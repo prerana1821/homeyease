@@ -315,15 +315,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/meal-plans/:id/meals', isAuthenticated, async (req: any, res) => {
     try {
       const mealPlanId = parseInt(req.params.id);
-      const mealData = insertMealSchema.parse({
-        ...req.body,
-        mealPlanId,
-      });
       
-      const meal = await storage.createMeal(mealData);
+      if (isNaN(mealPlanId)) {
+        return res.status(400).json({ message: "Invalid meal plan ID" });
+      }
+      
+      // Validate the request body
+      const mealData = {
+        mealPlanId,
+        name: req.body.name,
+        description: req.body.description || "",
+        mealType: req.body.mealType,
+        dayOfWeek: parseInt(req.body.dayOfWeek),
+        calories: req.body.calories ? parseInt(req.body.calories) : null,
+        imageUrl: req.body.imageUrl || "",
+        ingredients: req.body.ingredients || [],
+        instructions: req.body.instructions || "",
+      };
+      
+      // Validate with schema
+      const validatedMealData = insertMealSchema.parse(mealData);
+      
+      const meal = await storage.createMeal(validatedMealData);
       res.json(meal);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error creating meal:", error);
+      if (error.name === 'ZodError') {
+        return res.status(400).json({ message: "Invalid meal data", errors: error.errors });
+      }
       res.status(500).json({ message: "Failed to create meal" });
     }
   });

@@ -131,32 +131,47 @@ export default function MealPlan() {
 
   const addManualMealMutation = useMutation({
     mutationFn: async (mealData: any) => {
-      // Ensure we have a valid meal plan
-      let mealPlanId = mealPlan?.id;
-      
-      if (!mealPlanId) {
-        // Create a new meal plan for this week
-        const newMealPlan = await apiRequest("POST", `/api/households/${householdId}/meal-plans`, {
-          weekStartDate: weekStartDate,
-          totalCalories: 0,
-          nutritionSummary: { protein: 0, carbs: 0, fat: 0, fiber: 0 }
-        });
-        mealPlanId = newMealPlan.id;
+      try {
+        // Ensure we have a valid meal plan
+        let mealPlanId = mealPlan?.id;
+        
+        if (!mealPlanId) {
+          // Create a new meal plan for this week
+          console.log("Creating new meal plan for week:", weekStartDate);
+          const newMealPlan = await apiRequest("POST", `/api/households/${householdId}/meal-plans`, {
+            weekStartDate: weekStartDate,
+            totalCalories: 0,
+            nutritionSummary: { protein: 0, carbs: 0, fat: 0, fiber: 0 }
+          });
+          mealPlanId = newMealPlan.id;
+          console.log("Created meal plan with ID:", mealPlanId);
+        }
+        
+        if (!mealPlanId) {
+          throw new Error("Failed to get or create meal plan");
+        }
+        
+        const mealPayload = {
+          name: mealData.name,
+          description: mealData.description || "",
+          mealType: mealData.mealType,
+          dayOfWeek: parseInt(mealData.dayOfWeek),
+          calories: parseInt(mealData.calories) || 0,
+          ingredients: typeof mealData.ingredients === 'string' && mealData.ingredients.trim()
+            ? mealData.ingredients.split(',').map((ing: string) => ({ name: ing.trim() }))
+            : [],
+          instructions: mealData.instructions || "",
+          imageUrl: "/api/placeholder/300/200"
+        };
+        
+        console.log("Adding meal to plan:", mealPlanId, mealPayload);
+        
+        // Add the meal to the plan
+        return apiRequest("POST", `/api/meal-plans/${mealPlanId}/meals`, mealPayload);
+      } catch (error) {
+        console.error("Error in addManualMealMutation:", error);
+        throw error;
       }
-      
-      // Add the meal to the plan
-      return apiRequest("POST", `/api/meal-plans/${mealPlanId}/meals`, {
-        name: mealData.name,
-        description: mealData.description,
-        mealType: mealData.mealType,
-        dayOfWeek: parseInt(mealData.dayOfWeek),
-        calories: parseInt(mealData.calories) || 0,
-        ingredients: typeof mealData.ingredients === 'string' && mealData.ingredients.trim()
-          ? mealData.ingredients.split(',').map((ing: string) => ({ name: ing.trim() }))
-          : [],
-        instructions: mealData.instructions || "",
-        imageUrl: "/api/placeholder/300/200"
-      });
     },
     onSuccess: () => {
       setManualMeal({
@@ -173,8 +188,10 @@ export default function MealPlan() {
         title: "Success",
         description: "Meal added successfully!",
       });
+      // Refresh the meal plan data
       queryClient.invalidateQueries({ queryKey: [`/api/households/${householdId}/meal-plans/current`] });
       queryClient.invalidateQueries({ queryKey: [`/api/households/${householdId}/meal-plans/${weekStartDate}`] });
+      queryClient.refetchQueries({ queryKey: [`/api/households/${householdId}/meal-plans/${weekStartDate}`] });
     },
     onError: (error) => {
       toast({
