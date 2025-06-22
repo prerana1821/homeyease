@@ -36,6 +36,19 @@ export default function MealPlan() {
     ingredients: "",
     instructions: ""
   });
+
+  const openMealDialog = (dayOfWeek: number, mealType: string) => {
+    setManualMeal({
+      name: "",
+      description: "",
+      mealType: mealType,
+      dayOfWeek: dayOfWeek.toString(),
+      calories: "",
+      ingredients: "",
+      instructions: ""
+    });
+    setIsManualEntryOpen(true);
+  };
   
   const { data: households } = useQuery({
     queryKey: ["/api/households"],
@@ -118,25 +131,30 @@ export default function MealPlan() {
 
   const addManualMealMutation = useMutation({
     mutationFn: async (mealData: any) => {
-      let currentMealPlan = mealPlan;
+      // Ensure we have a valid meal plan
+      let mealPlanId = mealPlan?.id;
       
-      // Create meal plan if it doesn't exist
-      if (!currentMealPlan) {
-        const weekStartDateStr = weekStartDate;
+      if (!mealPlanId) {
+        // Create a new meal plan for this week
         const newMealPlan = await apiRequest("POST", `/api/households/${householdId}/meal-plans`, {
-          weekStartDate: weekStartDateStr,
+          weekStartDate: weekStartDate,
           totalCalories: 0,
           nutritionSummary: { protein: 0, carbs: 0, fat: 0, fiber: 0 }
         });
-        currentMealPlan = newMealPlan;
+        mealPlanId = newMealPlan.id;
       }
       
       // Add the meal to the plan
-      return apiRequest("POST", `/api/meal-plans/${currentMealPlan.id}/meals`, {
-        ...mealData,
+      return apiRequest("POST", `/api/meal-plans/${mealPlanId}/meals`, {
+        name: mealData.name,
+        description: mealData.description,
+        mealType: mealData.mealType,
         dayOfWeek: parseInt(mealData.dayOfWeek),
         calories: parseInt(mealData.calories) || 0,
-        ingredients: mealData.ingredients.split(',').map((ing: string) => ({ name: ing.trim() })),
+        ingredients: typeof mealData.ingredients === 'string' && mealData.ingredients.trim()
+          ? mealData.ingredients.split(',').map((ing: string) => ({ name: ing.trim() }))
+          : [],
+        instructions: mealData.instructions || "",
         imageUrl: "/api/placeholder/300/200"
       });
     },
@@ -411,8 +429,13 @@ export default function MealPlan() {
                           </div>
                         </div>
                       ) : (
-                        <div className="h-full flex items-center justify-center text-slate-400">
-                          <span className="text-xs">No meal planned</span>
+                        <div className="h-full flex items-center justify-center">
+                          <button
+                            onClick={() => openMealDialog(dayIndex, type)}
+                            className="w-8 h-8 rounded-full border-2 border-dashed border-slate-300 hover:border-primary hover:bg-primary/5 flex items-center justify-center text-slate-400 hover:text-primary transition-colors"
+                          >
+                            <Plus className="h-4 w-4" />
+                          </button>
                         </div>
                       )}
                     </div>
