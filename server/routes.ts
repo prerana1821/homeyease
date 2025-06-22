@@ -8,6 +8,7 @@ import {
   insertProfileSchema,
   insertInventoryItemSchema,
   insertMealPlanSchema,
+  insertMealSchema,
   insertMealApprovalSchema,
   insertMealCommentSchema,
   insertShoppingListItemSchema,
@@ -307,6 +308,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching meal plan:", error);
       res.status(500).json({ message: "Failed to fetch meal plan" });
+    }
+  });
+
+  // Create individual meal
+  app.post('/api/meal-plans/:id/meals', isAuthenticated, async (req: any, res) => {
+    try {
+      const mealPlanId = parseInt(req.params.id);
+      const mealData = insertMealSchema.parse({
+        ...req.body,
+        mealPlanId,
+      });
+      
+      const meal = await storage.createMeal(mealData);
+      res.json(meal);
+    } catch (error) {
+      console.error("Error creating meal:", error);
+      res.status(500).json({ message: "Failed to create meal" });
     }
   });
 

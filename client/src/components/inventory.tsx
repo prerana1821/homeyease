@@ -26,7 +26,8 @@ import {
   Calendar,
   DollarSign,
   X,
-  Share
+  Share,
+  List
 } from "lucide-react";
 
 interface InventoryItem {

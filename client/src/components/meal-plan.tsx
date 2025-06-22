@@ -4,6 +4,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -15,12 +19,23 @@ import {
   MessageCircle,
   Sun,
   Moon,
-  Send
+  Send,
+  Plus
 } from "lucide-react";
 
 export default function MealPlan() {
   const { toast } = useToast();
   const [newComment, setNewComment] = useState("");
+  const [isManualEntryOpen, setIsManualEntryOpen] = useState(false);
+  const [manualMeal, setManualMeal] = useState({
+    name: "",
+    description: "",
+    mealType: "",
+    dayOfWeek: "",
+    calories: "",
+    ingredients: "",
+    instructions: ""
+  });
   
   const { data: households } = useQuery({
     queryKey: ["/api/households"],
@@ -101,6 +116,57 @@ export default function MealPlan() {
     },
   });
 
+  const addManualMealMutation = useMutation({
+    mutationFn: async (mealData: any) => {
+      let currentMealPlan = mealPlan;
+      
+      // Create meal plan if it doesn't exist
+      if (!currentMealPlan) {
+        const weekStartDateStr = weekStartDate;
+        const newMealPlan = await apiRequest("POST", `/api/households/${householdId}/meal-plans`, {
+          weekStartDate: weekStartDateStr,
+          totalCalories: 0,
+          nutritionSummary: { protein: 0, carbs: 0, fat: 0, fiber: 0 }
+        });
+        currentMealPlan = newMealPlan;
+      }
+      
+      // Add the meal to the plan
+      return apiRequest("POST", `/api/meal-plans/${currentMealPlan.id}/meals`, {
+        ...mealData,
+        dayOfWeek: parseInt(mealData.dayOfWeek),
+        calories: parseInt(mealData.calories) || 0,
+        ingredients: mealData.ingredients.split(',').map((ing: string) => ({ name: ing.trim() })),
+        imageUrl: "/api/placeholder/300/200"
+      });
+    },
+    onSuccess: () => {
+      setManualMeal({
+        name: "",
+        description: "",
+        mealType: "",
+        dayOfWeek: "",
+        calories: "",
+        ingredients: "",
+        instructions: ""
+      });
+      setIsManualEntryOpen(false);
+      toast({
+        title: "Success",
+        description: "Meal added successfully!",
+      });
+      queryClient.invalidateQueries({ queryKey: [`/api/households/${householdId}/meal-plans/current`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/households/${householdId}/meal-plans/${weekStartDate}`] });
+    },
+    onError: (error) => {
+      toast({
+        title: "Error",
+        description: "Failed to add meal. Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
   const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const mealTypes = [
     { type: "breakfast", label: "Breakfast", icon: Sun, iconStyle: "" },
@@ -158,6 +224,114 @@ export default function MealPlan() {
               })}
             </span>
           </div>
+          <Dialog open={isManualEntryOpen} onOpenChange={setIsManualEntryOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="border-primary text-primary hover:bg-primary/10">
+                <Plus className="h-4 w-4 mr-2" />
+                Add Meal
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Add Manual Meal</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="mealName">Meal Name</Label>
+                  <Input
+                    id="mealName"
+                    value={manualMeal.name}
+                    onChange={(e) => setManualMeal(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="e.g., Chicken Stir Fry"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="description">Description</Label>
+                  <Textarea
+                    id="description"
+                    value={manualMeal.description}
+                    onChange={(e) => setManualMeal(prev => ({ ...prev, description: e.target.value }))}
+                    placeholder="Brief description of the meal"
+                    rows={2}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="mealType">Meal Type</Label>
+                    <Select value={manualMeal.mealType} onValueChange={(value) => setManualMeal(prev => ({ ...prev, mealType: value }))}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select type" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="breakfast">Breakfast</SelectItem>
+                        <SelectItem value="lunch">Lunch</SelectItem>
+                        <SelectItem value="dinner">Dinner</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="dayOfWeek">Day</Label>
+                    <Select value={manualMeal.dayOfWeek} onValueChange={(value) => setManualMeal(prev => ({ ...prev, dayOfWeek: value }))}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select day" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">Monday</SelectItem>
+                        <SelectItem value="1">Tuesday</SelectItem>
+                        <SelectItem value="2">Wednesday</SelectItem>
+                        <SelectItem value="3">Thursday</SelectItem>
+                        <SelectItem value="4">Friday</SelectItem>
+                        <SelectItem value="5">Saturday</SelectItem>
+                        <SelectItem value="6">Sunday</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="calories">Calories (optional)</Label>
+                  <Input
+                    id="calories"
+                    type="number"
+                    value={manualMeal.calories}
+                    onChange={(e) => setManualMeal(prev => ({ ...prev, calories: e.target.value }))}
+                    placeholder="e.g., 350"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="ingredients">Ingredients</Label>
+                  <Textarea
+                    id="ingredients"
+                    value={manualMeal.ingredients}
+                    onChange={(e) => setManualMeal(prev => ({ ...prev, ingredients: e.target.value }))}
+                    placeholder="Comma-separated ingredients (e.g., chicken breast, vegetables, rice)"
+                    rows={2}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="instructions">Instructions (optional)</Label>
+                  <Textarea
+                    id="instructions"
+                    value={manualMeal.instructions}
+                    onChange={(e) => setManualMeal(prev => ({ ...prev, instructions: e.target.value }))}
+                    placeholder="Cooking instructions"
+                    rows={3}
+                  />
+                </div>
+                <div className="flex justify-end space-x-2 pt-4">
+                  <Button variant="outline" onClick={() => setIsManualEntryOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button 
+                    onClick={() => addManualMealMutation.mutate(manualMeal)}
+                    disabled={addManualMealMutation.isPending || !manualMeal.name || !manualMeal.mealType || !manualMeal.dayOfWeek}
+                    className="bg-primary text-white hover:bg-primary/90"
+                  >
+                    {addManualMealMutation.isPending ? "Adding..." : "Add Meal"}
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
           <Button 
             onClick={() => generatePlanMutation.mutate()}
             disabled={generatePlanMutation.isPending}
