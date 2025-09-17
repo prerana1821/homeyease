@@ -1,0 +1,71 @@
+Architecture & Data flow (simplified)
+
+User -> WhatsApp message
+
+Webhook hits api
+
+Parse message -> determine intent (keyword rules + LLM intent fallback)
+
+start with onboarding questions first
+
+If “what’s for dinner?” -> Fetch user profile & pantry -> generate suggestions via prompt to OpenAI + consult meals DB
+
+If image -> forward to Google Vision -> get labels + OCR -> map to ingredients -> call LLM to suggest meals
+
+If “plan my week” -> call OpenAI to create 7-day plan, render HTML -> produce PDF via Puppeteer -> upload to Supabase Storage -> send link to user
+
+Store user preference, responses, and aggregated behaviour in Supabase for personalization and future embeddings. Optionally store embeddings in Supabase vector for RAG.
+
+Send text & media back to user via API endpoint.
+
+Minimal DB schema (Supabase)
+
+users (id, whatsapp_id, name, veg_flag, cuisines[], allergies[], created_at, last_active)
+
+meals (id, name, cuisine, ingredients[], tags[], recipe_text, estimated_time_min)
+
+user_pantry (user_id, ingredient, quantity, last_seen)
+
+sessions (id, user_id, prompt, response, created_at)
+
+meal_plans (id, user_id, plan_json, pdf_url, created_at)
+
+Keep meals small to start: seed 200 popular Indian dishes.
+
+Prompts / LLM design (practical)
+
+Intent classifier (small): rule-based keywords + fallback: You are an intent classifier. User text: .... Return one of: WHATSDINNER, PLANWEEK, UPLOAD_IMAGE, MOOD, ONBOARDING, OTHER. Keep this short so you can do cheap token calls.
+
+Suggestion generator: give profile + pantry list + mood + constraints. Example prompt snippet:
+
+User: veg=true, allergies=[peanut], cuisine_pref=[south indian], pantry=[rice, tomatoes, onions, green chilies, tofu]
+Task: Return 3 meal suggestions, each with: name, short description, 1-line recipe, missing ingredients list.
+Output JSON only.
+
+
+Image fallback: send Google Vision labels + OCR text to LLM with prompt: “Given these labels and texts, suggest 3 meals the user could make now.”
+
+Be strict about JSON-only outputs so parsing is stable.
+
+Security & privacy (must-haves for launch)
+
+Explicit consent in onboarding: “We store your dietary preferences and images to give you suggestions.” Link to minimal privacy policy.
+
+Hash/obfuscate WhatsApp IDs in logs.
+
+Limit image retention: auto-delete raw images after 30 days.
+
+TLS everywhere (Vercel + Supabase are TLS).
+
+Secure OpenAI & Vision keys with Vercel env vars / Supabase secrets.
+
+Quick dev tips & shortcuts
+
+Fake behaviour early: if image → meal is flaky, show “Top guesses” and ask user to confirm — conversational UX hides model flakiness.
+
+Seed prompts with deterministic examples to avoid hallucinations. Use JSON schema and zod to validate.
+
+Keep DB read models simple — do more in LLM prompt than in code early-on.
+
+For grocery snap, start with OCR for receipts & labels; full fridge detection is hard — be honest in UI: “I see onions, tomatoes, paneer?”  I don't need client, server architecture - I need a python server with webhook. all below features is just backend part in python server the UI is whatsapp. check exmaple in image attached WhatsApp webhook endpoint to receive and process incoming messages Intent classification system using keyword rules and OpenAI fallback for WHATSDINNER, PLANWEEK, UPLOAD_IMAGE, MOOD, ONBOARDING User onboarding flow with dietary preferences (vegetarian flag, cuisines, allergies) stored in Supabase Meal suggestion engine that fetches user profile and pantry data to generate 3 personalized meal recommendations via OpenAI Image processing pipeline using Google Vision API for ingredient recognition from photos Basic pantry management system allowing users to track ingredients and quantities Supabase database with users, meals, user_pantry, sessions, and meal_plans tables as specified Seed database with 200 popular Indian dishes including ingredients, cuisine types, and estimated cooking times WhatsApp message sending functionality to respond with meal suggestions and confirmations
+

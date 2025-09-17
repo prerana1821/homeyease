@@ -1,0 +1,178 @@
+Nice — let’s ship these exact, copy-pasteable WhatsApp Cloud API **interactive list** payloads for Q3 (Cuisine), Q4 (Allergies), and Q5 (Household size). I’m using **list messages** because they let you present more than 3 choices cleanly in WhatsApp UI. Each payload includes:
+
+* placeholders you must replace (`<PHONE_NUMBER_ID>`, `<WHATSAPP_TOKEN>`, `<RECIPIENT_PHONE>`)
+* a compact set of options tuned for Indian users (tap, don’t think)
+* `id` strings you can parse server-side to know the user response
+* a short fallback text (numeric menu) in case interactive lists aren’t supported
+
+Send these JSON bodies to:
+`POST https://graph.facebook.com/v17.0/<PHONE_NUMBER_ID>/messages`
+with header `Authorization: Bearer <WHATSAPP_TOKEN>` and `Content-Type: application/json`.
+
+---
+
+## 1) Q3 — Cuisine preference (interactive list)
+
+```json
+{
+  "messaging_product": "whatsapp",
+  "to": "<RECIPIENT_PHONE>",
+  "type": "interactive",
+  "interactive": {
+    "type": "list",
+    "body": {
+      "text": "Mambo 🍽️: Pick your kitchen vibe — pick one so I make suggestions you’ll actually love."
+    },
+    "action": {
+      "button": "Choose cuisine",
+      "sections": [
+        {
+          "title": "Popular",
+          "rows": [
+            { "id": "CUISINE_north_indian", "title": "North Indian", "description": "Gravies, rotis, biryani" },
+            { "id": "CUISINE_south_indian", "title": "South Indian", "description": "Dosa, idli, sambar" },
+            { "id": "CUISINE_indo_chinese", "title": "Chinese / Indo-Chinese", "description": "Quick & spicy wok dishes" },
+            { "id": "CUISINE_italian", "title": "Italian", "description": "Pasta, pizzas, simple flavors" }
+          ]
+        },
+        {
+          "title": "Regional & Other",
+          "rows": [
+            { "id": "CUISINE_punjabi", "title": "Punjabi", "description": "Tandoori, makki/saag, rich curries" },
+            { "id": "CUISINE_gujarati", "title": "Gujarati", "description": "Sweet-savory, vegetarian" },
+            { "id": "CUISINE_bengali", "title": "Bengali / East Indian", "description": "Fish & subtle spices" },
+            { "id": "CUISINE_international", "title": "International / Fusion", "description": "Thai, Mexican, Middle-Eastern..." }
+          ]
+        },
+        {
+          "title": "Fun",
+          "rows": [
+            { "id": "CUISINE_surprise", "title": "Surprise me 🎲", "description": "I’ll pick something new for you" }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+**Server parsing:** when webhook receives the response, extract `interactive.list_reply.id` (e.g. `CUISINE_south_indian`) and save to `cuisine_pref` in Supabase.
+
+**Fallback plain-text:**
+`Reply with the number: 1 North Indian, 2 South Indian, 3 Chinese, 4 Italian, 5 Punjabi, 6 Gujarati, 7 Bengali, 8 Intl, 9 Surprise`
+
+---
+
+## 2) Q4 — Allergies (interactive list with common Indian allergies + Other)
+
+```json
+{
+  "messaging_product": "whatsapp",
+  "to": "<RECIPIENT_PHONE>",
+  "type": "interactive",
+  "interactive": {
+    "type": "list",
+    "body": {
+      "text": "Mambo 🩺: Any allergies I should avoid when suggesting meals? Tap any that apply (or choose None)."
+    },
+    "action": {
+      "button": "Choose allergies",
+      "sections": [
+        {
+          "title": "Common allergies",
+          "rows": [
+            { "id": "ALLERGY_none", "title": "None ✅", "description": "No known food allergies" },
+            { "id": "ALLERGY_milk_dairy", "title": "Milk / Dairy 🥛", "description": "Milk, paneer, ghee" },
+            { "id": "ALLERGY_egg", "title": "Eggs 🥚", "description": "Egg white / yolk" },
+            { "id": "ALLERGY_peanut", "title": "Peanut 🥜", "description": "Peanuts or peanut oil" },
+            { "id": "ALLERGY_tree_nuts", "title": "Tree nuts (cashew/almond)", "description": "Cashew, almond, walnut" }
+          ]
+        },
+        {
+          "title": "Other common ones",
+          "rows": [
+            { "id": "ALLERGY_gluten_wheat", "title": "Wheat / Gluten 🌾", "description": "Roti, bread, pasta" },
+            { "id": "ALLERGY_soy", "title": "Soy 🌱", "description": "Soy products, sauces" },
+            { "id": "ALLERGY_fish", "title": "Fish 🐟", "description": "Coastal/seafood items" },
+            { "id": "ALLERGY_shellfish", "title": "Shellfish (prawn/shrimp)", "description": "Prawns, crabs" }
+          ]
+        },
+        {
+          "title": "Other / Regional",
+          "rows": [
+            { "id": "ALLERGY_sesame", "title": "Sesame", "description": "Til / sesame seeds or oil" },
+            { "id": "ALLERGY_other_type", "title": "Other (type it)", "description": "I’ll ask you to type the allergy" }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+**Server parsing:** read `interactive.list_reply.id`.
+
+* If id == `ALLERGY_other_type`, reply: `Please type the allergy name (e.g., 'mustard', 'coconut')` and accept free text then save to `allergies` array.
+* If id == `ALLERGY_none`, set allergies to `[]`. Otherwise add the selected allergy code to the `allergies` array in Supabase.
+
+**Fallback plain-text:**
+`Reply with number(s) separated by comma: 1 None, 2 Dairy, 3 Eggs, 4 Peanut, 5 Tree nuts, 6 Wheat/Gluten, 7 Soy, 8 Fish, 9 Shellfish, 10 Sesame, 11 Other (type)`
+
+---
+
+## 3) Q5 — Household size / cooking style (interactive list)
+
+```json
+{
+  "messaging_product": "whatsapp",
+  "to": "<RECIPIENT_PHONE>",
+  "type": "interactive",
+  "interactive": {
+    "type": "list",
+    "body": {
+      "text": "Mambo 🏡: Who are you usually cooking for? This helps me scale recipes right."
+    },
+    "action": {
+      "button": "Choose household",
+      "sections": [
+        {
+          "title": "Quick pick",
+          "rows": [
+            { "id": "HOUSE_single", "title": "Just me 👤", "description": "Single serving / quick recipes" },
+            { "id": "HOUSE_couple", "title": "Couple / 2 people 👩‍❤️‍👨", "description": "Portions for two" },
+            { "id": "HOUSE_small_family", "title": "Small family (3–4) 🍲", "description": "Family-friendly portions" },
+            { "id": "HOUSE_big_family", "title": "Big family (5+) 👨‍👩‍👧‍👦", "description": "Bigger batches" },
+            { "id": "HOUSE_shared_flat", "title": "Shared flat / Varies 🎲", "description": "Portions vary / host occasionally" }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+**Server parsing:** save the chosen `HOUSE_*` id into `household_size` (convert codes to enums like `single`, `couple`, `small_family`, `big_family`, `shared_flat`).
+
+**Fallback plain-text:**
+`Reply with number: 1 Just me, 2 Couple, 3 Small family (3–4), 4 Big family (5+), 5 Shared/Varies`
+
+---
+
+## Quick server-side tips for these flows
+
+1. **Id encoding** — `ID` strings are short, deterministic tokens your server can parse easily (e.g. split on `_` or map known ids). Do not encode secrets in them.
+2. **Confirmation message** — Immediately confirm the selection in user-friendly copy. Example:
+   `Mambo ✨: Perfect — North Indian it is! I’ll keep that in mind.`
+3. **If user taps multiple times quickly** — ignore duplicates and reply with a friendly debounce message: `Got it — saved. Want your first meal suggestion now?`
+4. **If list unsupported** — use the fallback numeric menu and parse their reply as numbers or comma-separated numbers. Map to same ids.
+5. **Persist to Supabase** — minimal record shape: `{ whatsapp_id, name (if given), diet, cuisine_pref, allergies:[], household_size, updated_at }`. Use upsert by `whatsapp_id`.
+6. **Follow-on action** — after Q5, send a summary card: `Here’s your profile — [Veg/Both] | [Cuisine] | [Allergies] | [Household]. Ready for your first suggestion? [Yes/No]` (buttons: Yes / No)
+
+---
+
+If you want, I’ll now:
+
+* provide the **exact Next.js API route code** to send one of these payloads and handle the webhook reply parsing → Supabase upsert, or
+* create a one-message **combined summary** template you send at the end of onboarding that looks like a beautiful Nykaa-style card (HTML → PDF or HTML preview).
+
+Which one do you want next?

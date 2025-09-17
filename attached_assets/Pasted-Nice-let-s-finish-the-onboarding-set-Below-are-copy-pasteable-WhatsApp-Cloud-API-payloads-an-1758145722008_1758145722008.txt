@@ -1,0 +1,165 @@
+Nice — let’s finish the onboarding set. Below are **copy-pasteable WhatsApp Cloud API payloads** (and handling notes) for:
+
+* **Q1 — Name** (free-text prompt, with quick-reply hint)
+* **Q2 — Dietary base** (interactive reply buttons: Veg / Non-Veg / Both)
+
+Each payload uses the same POST endpoint as before. Replace placeholders `<PHONE_NUMBER_ID>`, `<WHATSAPP_TOKEN>`, and `<RECIPIENT_PHONE>`. I’ll also include the exact webhook-parsing guidance, confirmation copy (Mambo tone), fallback text, and the Supabase field mapping for each question.
+
+---
+
+## Q1 — Name (free-text prompt)
+
+### Payload (simple text prompt)
+
+```json
+{
+  "messaging_product": "whatsapp",
+  "to": "<RECIPIENT_PHONE>",
+  "type": "text",
+  "text": {
+    "body": "Mambo 🥘: Hey! I’m Mambo — your kitchen sidekick. What should I call you? (Just type your name — or reply 'skip' if you prefer.)"
+  }
+}
+```
+
+### Server-side handling (webhook)
+
+* On incoming webhook, check for a normal text message (`message.type === "text"`).
+* If user reply text is `"skip"` (case-insensitive), set `name = null` or `"Guest"`.
+* Otherwise sanitize the text (trim, capitalize first letter, remove emojis / profanity if any) and store as `name` in Supabase.
+
+### Confirmation reply (send after saving)
+
+```json
+{
+  "messaging_product": "whatsapp",
+  "to": "<RECIPIENT_PHONE>",
+  "type": "text",
+  "text": {
+    "body": "Mambo ✨: Lovely — Hi {{name}}! I’ll remember that. Ready for a couple quick preferences so I can tailor your meals? (Yes / No)"
+  }
+}
+```
+
+* Replace `{{name}}` with the stored name. Include Yes/No buttons if you like (see earlier patterns) or wait for text.
+
+### Supabase mapping
+
+* Column: `users.name` (string)
+* Upsert by `whatsapp_id` (phone number)
+
+### Fallback
+
+* If client doesn’t send text (e.g., sticker/photo), reply:
+
+  > `I didn't catch your name. Please type your name (or reply 'skip').`
+
+---
+
+## Q2 — Dietary base (interactive quick-reply buttons)
+
+Use quick-reply buttons for minimal friction; they map cleanly to enums in DB.
+
+### Payload (interactive buttons)
+
+```json
+{
+  "messaging_product": "whatsapp",
+  "to": "<RECIPIENT_PHONE>",
+  "type": "interactive",
+  "interactive": {
+    "type": "button",
+    "body": {
+      "text": "Mambo 🌿🍗: Tell me your food base — what do you usually eat? Tap one."
+    },
+    "action": {
+      "buttons": [
+        {
+          "type": "reply",
+          "reply": {
+            "id": "DIET_veg",
+            "title": "Veg 🌱"
+          }
+        },
+        {
+          "type": "reply",
+          "reply": {
+            "id": "DIET_nonveg",
+            "title": "Non-Veg 🍗"
+          }
+        },
+        {
+          "type": "reply",
+          "reply": {
+            "id": "DIET_both",
+            "title": "Both 🍴"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+### Server-side handling (webhook)
+
+* On webhook receipt, extract `interactive.button_reply.id` (or `interactive.reply.id` depending on webhook shape).
+* Map:
+
+  * `DIET_veg` → `diet = "veg"`
+  * `DIET_nonveg` → `diet = "non-veg"`
+  * `DIET_both` → `diet = "both"`
+* Upsert to Supabase `users.diet` for the `whatsapp_id`.
+
+### Confirmation reply (Mambo tone)
+
+```json
+{
+  "messaging_product": "whatsapp",
+  "to": "<RECIPIENT_PHONE>",
+  "type": "text",
+  "text": {
+    "body": "Mambo ✅: Noted — you prefer *{{diet_label}}*. I’ll avoid suggesting meals that don’t match this. Next up: pick a cuisine vibe."
+  }
+}
+```
+
+* `{{diet_label}}` = "Veg 🌱" / "Non-Veg 🍗" / "Both 🍴"
+
+### Fallback (if buttons unsupported)
+
+Send numeric menu:
+
+```
+Mambo 🌿🍗: Reply with number — 1 Veg, 2 Non-Veg, 3 Both
+```
+
+Then parse incoming text `"1"`, `"2"`, `"3"`.
+
+### Supabase mapping
+
+* Column: `users.diet` (enum/string — store `"veg" | "non-veg" | "both"`)
+
+---
+
+## Extra UX & engineering tips (Falguni-style polish + reliability)
+
+1. **One question at a time** — Wait for and confirm each answer before sending the next question. Keeps chat clean and feels personal.
+2. **Idempotency** — If you receive the same answer twice (user taps again), reply with a friendly confirmation instead of duplicating writes.
+3. **Save-progress token** — Keep a tiny `onboarding_step` field in Supabase so you can resume if the user drops mid-flow. Example values: `0` (not started), `1` (name), `2` (diet), `3` (cuisine), `4` (allergies), `5` (household), `done`.
+4. **Persona microcopy** — Keep Mambo consistently warm, slightly witty, and short. E.g., “Mambo ✨: Got it!” vs dry “Saved.”
+5. **Privacy nudge** — After onboarding complete, send short consent:
+
+   > “I store your preferences (veg, allergies) to personalize suggestions. Reply YES to confirm.”
+   > Store confirmation timestamp in Supabase.
+6. **Testing** — Use ngrok + sandbox WhatsApp numbers to test flows end-to-end. Log webhook bodies to debug tokens/ids.
+7. **Analytics event** — Fire `onboarding_completed_step` events to PostHog for each question to see drop-offs.
+
+---
+
+If you want, I can now:
+
+* Provide the **Next.js API route** code for: sending Q1 and Q2 payloads and handling webhook replies to upsert into Supabase; or
+* Generate a single **onboarding summary card** message (HTML) to send at the end of all 5 questions (Q1–Q5) that looks polished and Nykaa-like.
+
+Which one should I build next?
