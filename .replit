@@ -5,3 +5,4 @@ integrations = ["python_openai:1.0.0", "flask_supabase:1.0.0", "twilio_send_mess
 
 [nix]
 channel = "stable-25_05"
+packages = ["freetype", "lcms2", "libGL", "libGLU", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "poppler_utils", "tcl", "tesseract", "tk", "zlib"]
