@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.webhook import router as webhook_router
 from app.config.settings import settings
+from app.config.supabase import supabase_client
 
 app = FastAPI(
     title="Mambo - WhatsApp Meal Planning Bot",
@@ -22,6 +23,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize Supabase client on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on application startup."""
+    print("🚀 Starting Mambo Bot...")
+    
+    # Initialize Supabase client
+    try:
+        supabase_healthy = await supabase_client.health_check()
+        if supabase_healthy:
+            print("✅ Supabase connection established")
+        else:
+            print("⚠️ Supabase connection failed")
+    except Exception as e:
+        print(f"❌ Error initializing Supabase: {e}")
+    
+    print("🤖 Mambo Bot ready!")
+
 # Include routers
 app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
 
@@ -31,7 +50,14 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "mambo-bot"}
+    # Check Supabase connectivity
+    supabase_healthy = await supabase_client.health_check()
+    
+    return {
+        "status": "healthy" if supabase_healthy else "degraded",
+        "service": "mambo-bot",
+        "database": "connected" if supabase_healthy else "disconnected"
+    }
 
 if __name__ == "__main__":
     import uvicorn

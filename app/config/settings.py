@@ -5,13 +5,15 @@ import os
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    # Database
-    database_url: str = os.getenv("DATABASE_URL", "")
+    # Supabase Database
+    supabase_url: str = os.getenv("SUPABASE_URL", "")
+    supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     
     def model_post_init(self, __context):
         """Validate settings after initialization."""
-        if not self.database_url:
-            raise ValueError("DATABASE_URL environment variable is required")
+        # Make Supabase optional for development/testing environments
+        if not self.supabase_url or not self.supabase_service_role_key:
+            print("⚠️ Warning: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY not set. Supabase features will be disabled.")
     
     # OpenAI
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")

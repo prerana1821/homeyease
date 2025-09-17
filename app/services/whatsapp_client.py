@@ -129,4 +129,86 @@ class WhatsAppClient:
         }
         return await self.send_message(to_phone, payload)
     
-    # TODO: Add methods for allergies and household questions
+    async def send_allergies_question(self, to_phone: str) -> bool:
+        """Send Q4 - Allergies question with interactive list."""
+        payload = {
+            "messaging_product": "whatsapp",
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {
+                    "text": "Mambo 🩺: Any allergies I should avoid when suggesting meals? Tap any that apply (or choose None)."
+                },
+                "action": {
+                    "button": "Choose allergies",
+                    "sections": [
+                        {
+                            "title": "Common allergies",
+                            "rows": [
+                                {"id": "ALLERGY_none", "title": "None ✅", "description": "No known food allergies"},
+                                {"id": "ALLERGY_milk_dairy", "title": "Milk / Dairy 🥛", "description": "Milk, paneer, ghee"},
+                                {"id": "ALLERGY_egg", "title": "Eggs 🥚", "description": "Egg white / yolk"},
+                                {"id": "ALLERGY_peanut", "title": "Peanut 🥜", "description": "Peanuts or peanut oil"},
+                                {"id": "ALLERGY_tree_nuts", "title": "Tree nuts (cashew/almond)", "description": "Cashew, almond, walnut"}
+                            ]
+                        },
+                        {
+                            "title": "Other common ones",
+                            "rows": [
+                                {"id": "ALLERGY_gluten_wheat", "title": "Wheat / Gluten 🌾", "description": "Roti, bread, pasta"},
+                                {"id": "ALLERGY_soy", "title": "Soy 🌱", "description": "Soy products, sauces"},
+                                {"id": "ALLERGY_fish", "title": "Fish 🐟", "description": "Coastal/seafood items"},
+                                {"id": "ALLERGY_shellfish", "title": "Shellfish (prawn/shrimp)", "description": "Prawns, crabs"}
+                            ]
+                        },
+                        {
+                            "title": "Other / Regional",
+                            "rows": [
+                                {"id": "ALLERGY_sesame", "title": "Sesame", "description": "Til / sesame seeds or oil"},
+                                {"id": "ALLERGY_other_type", "title": "Other (type it)", "description": "I'll ask you to type the allergy"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        return await self.send_message(to_phone, payload)
+    
+    async def send_household_question(self, to_phone: str) -> bool:
+        """Send Q5 - Household question with interactive list."""
+        payload = {
+            "messaging_product": "whatsapp",
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {
+                    "text": "Mambo 🏡: Who are you usually cooking for? This helps me scale recipes right."
+                },
+                "action": {
+                    "button": "Choose household",
+                    "sections": [
+                        {
+                            "title": "Quick pick",
+                            "rows": [
+                                {"id": "HOUSE_single", "title": "Just me 👤", "description": "Single serving / quick recipes"},
+                                {"id": "HOUSE_couple", "title": "Couple / 2 people 👩‍❤️‍👨", "description": "Portions for two"},
+                                {"id": "HOUSE_small_family", "title": "Small family (3–4) 🍲", "description": "Family-friendly portions"},
+                                {"id": "HOUSE_big_family", "title": "Big family (5+) 👨‍👩‍👧‍👦", "description": "Bigger batches"},
+                                {"id": "HOUSE_shared_flat", "title": "Shared flat / Varies 🎲", "description": "Portions vary / host occasionally"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        return await self.send_message(to_phone, payload)
+    
+    async def send_confirmation_message(self, to_phone: str, name: str) -> bool:
+        """Send name confirmation message."""
+        text = f"Mambo ✨: Lovely — Hi {name}! I'll remember that. Ready for a couple quick preferences so I can tailor your meals? (Yes / No)"
+        return await self.send_text_message(to_phone, text)
+    
+    async def send_diet_confirmation(self, to_phone: str, diet_label: str) -> bool:
+        """Send diet preference confirmation."""
+        text = f"Mambo ✅: Noted — you prefer *{diet_label}*. I'll avoid suggesting meals that don't match this. Next up: pick a cuisine vibe."
+        return await self.send_text_message(to_phone, text)
