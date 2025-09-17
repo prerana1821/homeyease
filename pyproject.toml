@@ -8,6 +8,7 @@ dependencies = [
     "dateparser>=1.2.0",
     "fastapi>=0.104.0",
     "google-cloud-vision>=3.4.0",
+    "httpx>=0.28.1",
     "numpy>=1.24.0",
     "openai>=1.107.3",
     "opencv-python>=4.8.0",

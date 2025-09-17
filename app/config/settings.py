@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     # Database
     database_url: str = os.getenv("DATABASE_URL", "")
     
+    def model_post_init(self, __context):
+        """Validate settings after initialization."""
+        if not self.database_url:
+            raise ValueError("DATABASE_URL environment variable is required")
+    
     # OpenAI
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     

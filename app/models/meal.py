@@ -11,7 +11,7 @@ class Meal(Base):
     name = Column(String, nullable=False, index=True)
     cuisine = Column(String, nullable=False, index=True)
     ingredients = Column(ARRAY(String), nullable=False)
-    tags = Column(ARRAY(String), nullable=True, default=[])
+    tags = Column(ARRAY(String), nullable=True, server_default='{}')
     recipe_text = Column(Text, nullable=True)
     estimated_time_min = Column(Integer, nullable=True)
     diet_type = Column(String, nullable=False)  # veg, non-veg, both

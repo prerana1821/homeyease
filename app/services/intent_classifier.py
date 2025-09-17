@@ -55,6 +55,9 @@ class IntentClassifier:
     
     async def _classify_with_openai(self, text: str) -> str:
         """Use OpenAI for intent classification fallback."""
+        if not self.openai_client:
+            return "OTHER"
+            
         try:
             response = self.openai_client.chat.completions.create(
                 model="gpt-5",
@@ -70,7 +73,7 @@ class IntentClassifier:
                 ]
             )
             
-            intent = response.choices[0].message.content.strip().upper()
+            intent = response.choices[0].message.content.strip().upper() if response.choices[0].message.content else "OTHER"
             valid_intents = ["WHATSDINNER", "PLANWEEK", "UPLOAD_IMAGE", "MOOD", "ONBOARDING", "OTHER"]
             
             return intent if intent in valid_intents else "OTHER"

@@ -2,7 +2,7 @@
 WhatsApp Cloud API client for sending interactive messages.
 """
 import json
-import requests
+import httpx
 from typing import Dict, Any, List
 from app.config.settings import settings
 
@@ -18,8 +18,9 @@ class WhatsAppClient:
         """Send a message using WhatsApp Cloud API."""
         try:
             payload["to"] = to_phone
-            response = requests.post(self.base_url, headers=self.headers, json=payload)
-            response.raise_for_status()
+            async with httpx.AsyncClient() as client:
+                response = await client.post(self.base_url, headers=self.headers, json=payload)
+                response.raise_for_status()
             return True
         except Exception as e:
             print(f"Error sending WhatsApp message: {e}")
