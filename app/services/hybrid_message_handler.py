@@ -1,42 +1,32 @@
 """
-Hybrid message handler that can work with both WhatsApp Cloud API and Twilio.
-This allows seamless switching between communication channels.
+Twilio-only message handler for SMS and WhatsApp via Twilio.
+Simplified from hybrid approach to use only Twilio communication channels.
 """
 from typing import Dict, Any, List, Optional
 from app.services.message_handler import MessageHandler
-from app.services.whatsapp_client import WhatsAppClient
 from app.services.twilio_client import TwilioClient
 from app.config.settings import settings
 
 class HybridMessageHandler(MessageHandler):
     def __init__(self):
         super().__init__()
-        self.whatsapp_client = WhatsAppClient()
         self.twilio_client = TwilioClient()
         
-        # Determine which client to use based on available credentials
-        self.use_whatsapp = bool(settings.whatsapp_token and settings.whatsapp_phone_number_id)
+        # Check Twilio availability
         self.use_twilio = bool(settings.twilio_account_sid and settings.twilio_auth_token)
         
-        print(f"📱 Communication channels: WhatsApp={self.use_whatsapp}, Twilio={self.use_twilio}")
+        print(f"📱 Communication channels: Twilio={self.use_twilio}")
     
     async def send_message_via_best_channel(self, phone: str, message: str) -> bool:
-        """Send message via the best available channel."""
-        # Try WhatsApp Cloud API first if available
-        if self.use_whatsapp:
-            success = await self.whatsapp_client.send_text_message(phone, message)
-            if success:
-                return True
-            print("⚠️ WhatsApp Cloud API failed, trying Twilio...")
-        
-        # Fallback to Twilio SMS
+        """Send message via Twilio channels."""
         if self.use_twilio:
+            # Try Twilio SMS first
             success = await self.twilio_client.send_sms(phone, message)
             if success:
                 return True
             print("⚠️ Twilio SMS failed, trying Twilio WhatsApp...")
             
-            # Try Twilio WhatsApp as last resort
+            # Try Twilio WhatsApp as fallback
             success = await self.twilio_client.send_whatsapp_message(phone, message)
             return success
         
@@ -44,21 +34,7 @@ class HybridMessageHandler(MessageHandler):
         return False
     
     async def send_onboarding_question(self, phone: str, question_type: str, **kwargs) -> bool:
-        """Send onboarding question via best available channel."""
-        if self.use_whatsapp:
-            # Use rich interactive messages for WhatsApp Cloud API
-            if question_type == "name":
-                return await self.whatsapp_client.send_name_question(phone)
-            elif question_type == "diet":
-                return await self.whatsapp_client.send_diet_question(phone)
-            elif question_type == "cuisine":
-                return await self.whatsapp_client.send_cuisine_question(phone)
-            elif question_type == "allergies":
-                return await self.whatsapp_client.send_allergies_question(phone)
-            elif question_type == "household":
-                return await self.whatsapp_client.send_household_question(phone)
-        
-        # Fallback to Twilio with simplified text-based questions
+        """Send onboarding question via Twilio with simplified text-based questions."""
         if self.use_twilio:
             user_name = kwargs.get('user_name')
             return await self.twilio_client.send_onboarding_question_sms(phone, question_type, user_name)
@@ -66,16 +42,12 @@ class HybridMessageHandler(MessageHandler):
         return False
     
     async def send_meal_recommendations(self, phone: str, recommendations: List[Dict[str, Any]]) -> bool:
-        """Send meal recommendations via best available channel."""
-        if self.use_whatsapp:
-            # Use existing WhatsApp formatting
-            await self._send_meal_recommendations(phone, recommendations, "")
-            return True
-        
+        """Send meal recommendations via Twilio."""
         if self.use_twilio:
             # Use Twilio-optimized formatting
             return await self.twilio_client.send_meal_recommendations_sms(phone, recommendations)
         
+        print("❌ No communication channels available")
         return False
     
     async def _handle_post_onboarding_message(self, sender_phone: str, message: Dict[str, Any]) -> None:

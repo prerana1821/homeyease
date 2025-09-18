@@ -5,7 +5,7 @@ import json
 from typing import Dict, Any, List
 from app.services.onboarding_service import OnboardingService
 from app.services.intent_classifier import IntentClassifier
-from app.services.whatsapp_client import WhatsAppClient
+from app.services.twilio_client import TwilioClient
 from app.services.recommendation_service import RecommendationService
 from app.services.image_service import ImageService
 
@@ -13,7 +13,7 @@ class MessageHandler:
     def __init__(self):
         self.onboarding_service = OnboardingService()
         self.intent_classifier = IntentClassifier()
-        self.whatsapp_client = WhatsAppClient()
+        self.twilio_client = TwilioClient()
         self.recommendation_service = RecommendationService()
         self.image_service = ImageService()
     
@@ -69,13 +69,13 @@ class MessageHandler:
                 await self._handle_interactive_message(sender_phone, message)
             else:
                 # Send a helpful response for unsupported message types
-                await self.whatsapp_client.send_text_message(
+                await self.twilio_client.send_sms(
                     sender_phone,
                     "Mambo 🤖: I can help with meal suggestions! Just ask me what you'd like to eat, send a food photo, or ask for recipes. What can I help you cook today?"
                 )
         except Exception as e:
             print(f"Error handling post-onboarding message: {e}")
-            await self.whatsapp_client.send_text_message(
+            await self.twilio_client.send_sms(
                 sender_phone,
                 "Mambo 😅: Sorry, I had a little hiccup. Could you try asking again? I'm here to help with your meals!"
             )
@@ -103,14 +103,14 @@ class MessageHandler:
             image_id = image_info.get("id")
             
             if not image_id:
-                await self.whatsapp_client.send_text_message(
+                await self.twilio_client.send_sms(
                     sender_phone,
                     "Mambo 📸: I couldn't process that image. Could you try sending it again or tell me what ingredients you have?"
                 )
                 return
             
             # Send immediate acknowledgment
-            await self.whatsapp_client.send_text_message(
+            await self.twilio_client.send_sms(
                 sender_phone,
                 "Mambo 📸: Let me analyze your photo to identify ingredients... This might take a moment!"
             )
@@ -126,11 +126,11 @@ class MessageHandler:
                 "then I can suggest some amazing meals you can make! 👨‍🍳"
             )
             
-            await self.whatsapp_client.send_text_message(sender_phone, response_text)
+            await self.twilio_client.send_sms(sender_phone, response_text)
             
         except Exception as e:
             print(f"Error handling image message: {e}")
-            await self.whatsapp_client.send_text_message(
+            await self.twilio_client.send_sms(
                 sender_phone,
                 "Mambo 📸: I had trouble with that image. Could you tell me what ingredients you have instead? I'll suggest some great meals!"
             )
@@ -138,7 +138,7 @@ class MessageHandler:
     async def _handle_interactive_message(self, sender_phone: str, message: Dict[str, Any]) -> None:
         """Handle interactive button/list responses."""
         # This could be used for follow-up questions or meal selections
-        await self.whatsapp_client.send_text_message(
+        await self.twilio_client.send_sms(
             sender_phone,
             "Mambo ✨: Got it! What else can I help you cook today?"
         )
@@ -146,7 +146,7 @@ class MessageHandler:
     async def _send_meal_recommendations(self, sender_phone: str, recommendations: List[Dict[str, Any]], original_message: str) -> None:
         """Format and send meal recommendations to user."""
         if not recommendations:
-            await self.whatsapp_client.send_text_message(
+            await self.twilio_client.send_sms(
                 sender_phone,
                 "Mambo 🤔: I'm still learning about your taste! Could you try asking for something specific like 'suggest dinner' or 'what can I make with rice'?"
             )
@@ -183,4 +183,4 @@ class MessageHandler:
         response_text += "Want the full recipe for any of these? Just ask 'recipe for [dish name]' 👨‍🍳"
         
         # Send the recommendation
-        await self.whatsapp_client.send_text_message(sender_phone, response_text)
+        await self.twilio_client.send_sms(sender_phone, response_text)

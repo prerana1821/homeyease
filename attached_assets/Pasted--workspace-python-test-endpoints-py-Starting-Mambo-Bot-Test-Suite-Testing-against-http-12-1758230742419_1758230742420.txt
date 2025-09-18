@@ -1,0 +1,84 @@
+~/workspace$ python test_endpoints.py
+🧪 Starting Mambo Bot Test Suite...
+Testing against: http://127.0.0.1:5000
+
+🔍 Testing Health Endpoints...
+✅ PASS Root endpoint - Status: 200
+✅ PASS Health endpoint - DB: connected
+
+🔍 Testing Webhook Verification...
+✅ PASS Webhook verification (valid) - Response: test_challenge_123
+✅ PASS Webhook verification (invalid) - Status: 403
+
+🔍 Testing Message Processing...
+✅ PASS Message processing (onboarding) - Status: 200
+✅ PASS Message processing (meal request) - Status: 200
+
+🔍 Testing Intent Classification...
+✅ PASS Intent: 'What should I eat for dinner?...' - Got: WHATSDINNER, Expected: WHATSDINNER
+✅ PASS Intent: 'How to make butter chicken?...' - Got: RECIPE_REQUEST, Expected: RECIPE_REQUEST
+✅ PASS Intent: 'I have rice and vegetables, wh...' - Got: PANTRY_HELP, Expected: PANTRY_HELP
+Error classifying intent with OpenAI: Error code: 401 - {'error': {'message': 'Incorrect API key provided: -proj-fJ******************************************************************************************************************************************************T2AA. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}}
+❌ FAIL Intent: 'Plan my meals for this week...' - Got: OTHER, Expected: PLANWEEK
+✅ PASS Intent: 'I'm craving something spicy...' - Got: MOOD, Expected: MOOD
+✅ PASS Intent: 'Do you have vegan options?...' - Got: DIETARY_QUERY, Expected: DIETARY_QUERY
+Error classifying intent with OpenAI: Error code: 401 - {'error': {'message': 'Incorrect API key provided: -proj-fJ******************************************************************************************************************************************************T2AA. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}}
+✅ PASS Intent: 'Random text here...' - Got: OTHER, Expected: OTHER
+
+🔍 Testing Database Operations...
+Error creating user: 'SyncQueryRequestBuilder' object has no attribute 'select'
+❌ FAIL User creation - User ID: None
+✅ PASS Meal search - Found 0 meals
+✅ Successfully added 16 Indian meals to database
+✅ PASS Meal population - Population result: True
+
+🔍 Testing Image Processing...
+✅ Google Cloud Vision client initialized
+✅ PASS Image fallback ingredients - Got 5 ingredients
+✅ PASS Ingredient suggestions - Got 3 suggestions
+
+📊 Test Summary:
+Passed: 16/18
+
+❌ Failed Tests:
+  - Intent: 'Plan my meals for this week...': Got: OTHER, Expected: PLANWEEK
+  - User creation: User ID: None
+
+⚠️ Some tests failed. Check the details above.
+~/workspace$ 
+~/workspace$ python test_twilio_integration.py
+🚀 Starting Twilio Integration Tests...
+🧪 Testing Twilio Integration...
+
+📱 Testing Twilio Client...
+✅ Twilio client initialized
+✅ Twilio client initialized
+✅ Twilio connection test successful. Account: homeyease
+✅ Twilio connection test passed
+⚠️ No TEST_PHONE_NUMBER set, skipping SMS test
+
+🔄 Testing Message Adapter...
+✅ SMS to WhatsApp format conversion works
+✅ Interactive response parsing works
+
+🔀 Testing Hybrid Message Handler...
+✅ Google Cloud Vision client initialized
+✅ Twilio client initialized
+📱 Communication channels: WhatsApp=True, Twilio=True
+✅ Twilio connection test successful. Account: homeyease
+📊 Channel Status: {'whatsapp_cloud_api': {'available': True, 'configured': True}, 'twilio_sms': {'available': True, 'configured': True}, 'twilio_whatsapp': {'available': True, 'configured': True}, 'twilio_connection_test': True}
+
+🎯 Twilio Integration Test Complete!
+
+🌐 Testing Webhook Simulation...
+❌ Failed to initialize Google Cloud Vision: Expecting value: line 1 column 1 (char 0)
+Error getting user by whatsapp_id: {'message': 'Cannot coerce the result to a single JSON object', 'code': 'PGRST116', 'hint': None, 'details': 'The result contains 0 rows'}
+Error getting user by whatsapp_id: {'message': 'Cannot coerce the result to a single JSON object', 'code': 'PGRST116', 'hint': None, 'details': 'The result contains 0 rows'}
+Error sending WhatsApp message: Client error '400 Bad Request' for url 'https://graph.facebook.com/v17.0/776951448837189/messages'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400
+✅ SMS webhook simulation successful
+Error getting user by whatsapp_id: {'message': 'Cannot coerce the result to a single JSON object', 'code': 'PGRST116', 'hint': None, 'details': 'The result contains 0 rows'}
+Error getting user by whatsapp_id: {'message': 'Cannot coerce the result to a single JSON object', 'code': 'PGRST116', 'hint': None, 'details': 'The result contains 0 rows'}
+Error sending WhatsApp message: Client error '400 Bad Request' for url 'https://graph.facebook.com/v17.0/776951448837189/messages'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400
+✅ WhatsApp webhook simulation successful

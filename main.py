@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.webhook import router as webhook_router
 from app.api.twilio_webhook import router as twilio_webhook_router
 from app.config.supabase import supabase_client  # global instance
 
@@ -56,9 +55,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
-app.include_router(twilio_webhook_router, prefix="/webhook/twilio", tags=["twilio"])
+# Include routers - Twilio-only
+app.include_router(twilio_webhook_router, prefix="/webhook", tags=["webhook"])
 
 
 @app.get("/")
@@ -67,6 +65,11 @@ async def root():
         "message": "Mambo WhatsApp Meal Planning Bot is running!",
         "status": "healthy"
     }
+
+
+@app.head("/api")
+async def api_head():
+    return {"status": "healthy"}
 
 
 @app.get("/health")

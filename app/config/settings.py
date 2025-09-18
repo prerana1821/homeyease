@@ -19,10 +19,7 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     
-    # WhatsApp Cloud API (will be added when we get the keys)
-    whatsapp_phone_number_id: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-    whatsapp_token: str = os.getenv("WHATSAPP_TOKEN", "")
-    whatsapp_verify_token: str = os.getenv("WHATSAPP_VERIFY_TOKEN", "mambo_verify_token")
+    # Removed WhatsApp Cloud API - Using Twilio-only approach
     
     # Google Cloud Vision
     google_application_credentials: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
