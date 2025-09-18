@@ -1,15 +1,13 @@
 """
-User service for database operations using Supabase.
+User service for database operations using PostgreSQL.
 """
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from app.config.supabase import supabase_client
+from app.config.database import db_manager
 
 class UserService:
     def __init__(self):
-        self.client = supabase_client.client
-        if self.client is None:
-            print("⚠️ Warning: Supabase client not available. Database operations will fail.")
+        self.db = db_manager
     
     async def get_user_by_whatsapp_id(self, whatsapp_id: str) -> Optional[Dict[str, Any]]:
         """Get user by WhatsApp ID."""

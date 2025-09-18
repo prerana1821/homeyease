@@ -1,33 +1,12 @@
 """
-Database connection and session management.
+Database connection using Supabase.
 """
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from app.config.settings import settings
+# This file is kept for compatibility but all database operations
+# are now handled through the Supabase client in app/config/supabase.py
 
-# Create database engine
-engine = create_engine(settings.database_url)
+# Import the Supabase client
+from app.config.supabase import SupabaseClient
 
-# Create SessionLocal class
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Create Base class for models
-Base = declarative_base()
-
-def get_database_session():
-    """Get a database session context manager."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# Dependency for FastAPI
-def get_db():
-    """Database dependency for FastAPI."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def get_supabase_client():
+    """Get Supabase client instance."""
+    return SupabaseClient().client
