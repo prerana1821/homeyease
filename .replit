@@ -23,14 +23,22 @@ args = "FastAPI Server"
 name = "FastAPI Server"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python main.py"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "uv run uvicorn main:app --host 0.0.0.0 --port 5000 --reload"
+waitForPort = 5000
 
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 35123
+externalPort = 3000
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
