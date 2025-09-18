@@ -121,7 +121,21 @@ curl -X POST http://127.0.0.1:5000/webhook/whatsapp \
 # expected: {"status":"ok"} and logs show handler processing
 ```
 
-4. Expose locally and test with Meta:
+4. Test Twilio webhook endpoints
+
+```bash
+# Test Twilio SMS webhook
+curl -X POST http://127.0.0.1:5000/webhook/twilio/sms \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "From=%2B1234567890&To=%2B0987654321&Body=Hello%20Mambo&MessageSid=test123&AccountSid=test"
+
+# Test Twilio WhatsApp webhook  
+curl -X POST http://127.0.0.1:5000/webhook/twilio/whatsapp \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "From=whatsapp%3A%2B1234567890&To=whatsapp%3A%2B0987654321&Body=What%27s%20for%20dinner&MessageSid=test123&AccountSid=test"
+```
+
+5. Expose locally and test with Meta:
 
 ```bash
 # start ngrok
@@ -133,19 +147,67 @@ ngrok http 5000
 
 Once verified, use Graph API to send a test message (requires WHATSAPP\_TOKEN + PHONE\_NUMBER\_ID).
 
+## Using Twilio Instead of WhatsApp Cloud API
+
+The project now supports Twilio as an alternative to WhatsApp Cloud API. This is useful for:
+- Testing without WhatsApp Business API approval
+- SMS fallback when WhatsApp is unavailable  
+- Regions where WhatsApp Business API isn't available
+
+### Twilio Setup
+
+1. Create a Twilio account at https://www.twilio.com
+2. Get your Account SID and Auth Token from the Twilio Console
+3. Purchase a phone number (for SMS) or set up WhatsApp Business API
+4. Add to your `.env`:
+
+```env
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_twilio_auth_token  
+TWILIO_PHONE_NUMBER="+12727882550"
+```
+
+### Twilio Webhook URLs
+
+Configure these webhook URLs in your Twilio Console:
+
+- **SMS**: `https://your-domain.com/webhook/twilio/sms`
+- **WhatsApp**: `https://your-domain.com/webhook/twilio/whatsapp`
+
+### Hybrid Mode
+
+The bot automatically detects available credentials and uses the best channel:
+1. WhatsApp Cloud API (if configured) - Rich interactive messages
+2. Twilio SMS (fallback) - Text-based with numbered options
+3. Twilio WhatsApp (if configured) - WhatsApp via Twilio
+
+### Testing Twilio Integration
+
+```bash
+# Run Twilio-specific tests
+python test_twilio_integration.py
+
+# Set test phone number in .env
+TEST_PHONE_NUMBER="+1234567890"
+```
+
 ---
 
 # Running tests
 
 ```bash
-pip install -r dev-requirements.txt   # includes pytest, httpx, pytest-asyncio
-pytest -q
+# Run comprehensive test suite
+python test_endpoints.py
+
+# Run Twilio integration tests  
+python test_twilio_integration.py
 ```
 
 Notes:
 
 * If `MessageHandler.process_webhook` is async, tests use `AsyncMock`.
 * Unit tests mock external services (Supabase, Vision) for determinism.
+* Twilio tests require valid credentials and test phone number
 
 ---
 

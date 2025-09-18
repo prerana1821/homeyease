@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.webhook import router as webhook_router
+from app.api.twilio_webhook import router as twilio_webhook_router
 from app.config.supabase import supabase_client  # global instance
 
 logger = logging.getLogger("uvicorn.error")
@@ -57,6 +58,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
+app.include_router(twilio_webhook_router, prefix="/webhook/twilio", tags=["twilio"])
 
 
 @app.get("/")
