@@ -17,6 +17,7 @@ async def main():
 
     # Test connection (sync method, so call without await)
     diag = client.test_connection()
+
     print("Connection diagnostics:", diag)
 
     # Try sending a WhatsApp message if env var is set

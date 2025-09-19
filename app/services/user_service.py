@@ -1,311 +1,181 @@
 # app/services/user_service.py
-"""
-User service for database operations using Supabase.
-
-This version is defensive about supabase-python client shapes and returns
-structured dicts to make diagnostics easier in higher layers.
-"""
-from typing import Optional, List, Dict, Any, Callable
+from typing import Any, Dict, Optional
 from datetime import datetime
-import asyncio
-import logging
-
-from app.config.supabase import supabase_client
-
-logger = logging.getLogger(__name__)
-
-
-def _parse_supabase_response(resp: Any) -> Dict[str, Any]:
-    """
-    Normalize a supabase client response in a best-effort way.
-    Returns: {'ok': bool, 'data': <possibly list or dict>, 'status_code': int|None, 'raw': resp}
-    """
-    if resp is None:
-        return {"ok": False, "data": None, "status_code": None, "raw": resp}
-
-    # Some client versions return an object with .data attribute
-    if hasattr(resp, "data"):
-        data = getattr(resp, "data")
-        status_code = getattr(resp, "status_code", None)
-        return {
-            "ok": True if data else False,
-            "data": data,
-            "status_code": status_code,
-            "raw": resp,
-        }
-
-    # Some versions return a dict-like result
-    try:
-        if isinstance(resp, dict):
-            data = resp.get("data", resp.get("result", resp.get("records", None)))
-            status_code = resp.get("status_code", resp.get("statusCode", None))
-            ok = True if data else False
-            return {"ok": ok, "data": data, "status_code": status_code, "raw": resp}
-    except Exception:
-        pass
-
-    # Fallback: stringify
-    return {"ok": False, "data": None, "status_code": None, "raw": resp}
-
-
-def _run_db(fn: Callable, *args, **kwargs):
-    """
-    Run blocking DB function in a thread and return the raw result.
-    Designed to be called with asyncio.to_thread or wrapped by callers.
-    """
-    try:
-        return fn(*args, **kwargs)
-    except Exception as exc:
-        # bubble up - caller will wrap
-        raise
 
 
 class UserService:
+    """
+    Thin service wrapper around a DB client (eg. Supabase client or similar).
+    * Expects a client with a .table(name) method that returns a query proxy
+      with methods like .select(...).eq(...).insert(...).update(...).upsert(...).execute()
+    * All public methods return {"ok": bool, "data": Any, "error": Optional[str]}
+    """
 
-    def __init__(self):
-        # supabase_client.client may be None; keep it lazy
-        self.client = supabase_client.client
-        if self.client is None:
-            logger.warning("Supabase client not available. DB operations will fail.")
+    def __init__(self, db_client):
+        self.db = db_client
 
-    # Helper used across methods to call sync supabase functions in a background thread
-    async def _call_db(self, fn: Callable, *args, **kwargs) -> Dict[str, Any]:
+    def _ok(self, data: Any = None):
+        return {"ok": True, "data": data, "error": None}
+
+    def _err(self, message: str):
+        return {"ok": False, "data": None, "error": message}
+
+    def _normalize_response(self, resp) -> Dict[str, Any]:
         """
-        Run fn(*args, **kwargs) in a thread and parse the supabase response.
-        Returns: normalized dict from _parse_supabase_response
+        Accept a typical client response and extract `.data` or dict-like content.
+        This is defensive: different clients return different shapes.
         """
-        if self.client is None:
-            return {
-                "ok": False,
-                "error": "no_supabase_client",
-                "diagnostics": {"client": None},
-            }
+        if resp is None:
+            return {"ok": False, "data": None, "error": "empty response from db client"}
+        # if response looks like supabase-py: has attributes `.data` and `.error`
+        data = None
+        error = None
+        try:
+            data = getattr(resp, "data", None)
+            err_obj = getattr(resp, "error", None)
+            if err_obj:
+                error = str(err_obj)
+        except Exception:
+            # try dict-like
+            try:
+                data = resp.get("data")
+                error = resp.get("error")
+            except Exception:
+                data = resp
+        return {"ok": error is None, "data": data, "error": error}
+
+    def get_user(
+        self, user_id: Optional[int] = None, whatsapp_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieve a single user by id or whatsapp_id. At least one must be provided.
+        """
+        if not user_id and not whatsapp_id:
+            return self._err("get_user requires either user_id or whatsapp_id")
+
+        q = self.db.table("users").select("*")
+        if user_id:
+            q = q.eq("id", user_id)
+        else:
+            q = q.eq("whatsapp_id", whatsapp_id)
+
+        q = q.limit(1)
+        try:
+            resp = q.execute()
+        except Exception as e:
+            return self._err(f"DB error during get_user: {e}")
+
+        norm = self._normalize_response(resp)
+        if not norm["ok"]:
+            return self._err(f"get_user db error: {norm['error']}")
+        rows = norm["data"] or []
+        return self._ok(rows[0] if rows else None)
+
+    def create_or_update_user(
+        self, whatsapp_id: Optional[str] = None, user_id: Optional[int] = None, **fields
+    ) -> Dict[str, Any]:
+        """
+        Create or update a user. Prefer upsert by whatsapp_id if provided, else by id.
+        Returns the created/updated row.
+        """
+        if not whatsapp_id and not user_id:
+            return self._err("create_or_update_user requires whatsapp_id or user_id")
+
+        payload = {**fields}
+        if whatsapp_id:
+            payload["whatsapp_id"] = whatsapp_id
+        if user_id:
+            payload["id"] = user_id
+
+        # Always add last_active timestamp if not supplied
+        if "last_active" not in payload:
+            payload["last_active"] = datetime.utcnow().isoformat()
+
+        # Try a defensive upsert first, but *don't* chain .select() to the upsert call
+        # (some clients/versions error on .upsert(...).select("*"))
+        try:
+            # Prefer on_conflict to be whatsapp_id if available else id
+            on_conflict = "whatsapp_id" if whatsapp_id else "id"
+            upsert_resp = (
+                self.db.table("users")
+                .upsert(payload, on_conflict=on_conflict)
+                .execute()
+            )
+            upsert_norm = self._normalize_response(upsert_resp)
+            if upsert_norm["ok"] and upsert_norm["data"]:
+                # If returned data present, return it.
+                # Some clients don't return the row on upsert; we'll SELECT below in that case.
+                if upsert_norm["data"]:
+                    # If API returned the inserted/updated row(s) directly, return the first row
+                    rows = upsert_norm["data"]
+                    return self._ok(rows[0] if isinstance(rows, list) else rows)
+        except Exception:
+            # swallow and fallback to safe path (see below)
+            pass
+
+        # Fallback: check if exists and then update or insert, then select the row
+        try:
+            # Does user already exist?
+            exists_q = self.db.table("users").select("*")
+            if whatsapp_id:
+                exists_q = exists_q.eq("whatsapp_id", whatsapp_id)
+            else:
+                exists_q = exists_q.eq("id", user_id)
+            exists_q = exists_q.limit(1)
+            exists_resp = exists_q.execute()
+            exists_norm = self._normalize_response(exists_resp)
+            if not exists_norm["ok"]:
+                return self._err(
+                    f"create_or_update_user: error checking existing user: {exists_norm['error']}"
+                )
+
+            exists = exists_norm["data"] or []
+            if exists:
+                # update
+                update_fields = {k: v for k, v in payload.items() if k not in ("id",)}
+                update_q = self.db.table("users").update(update_fields)
+                if whatsapp_id:
+                    update_q = update_q.eq("whatsapp_id", whatsapp_id)
+                else:
+                    update_q = update_q.eq("id", user_id)
+                update_resp = update_q.execute()
+                update_norm = self._normalize_response(update_resp)
+                # If update didn't return rows, fetch row explicitly
+            else:
+                # insert
+                insert_resp = self.db.table("users").insert(payload).execute()
+                insert_norm = self._normalize_response(insert_resp)
+                if not insert_norm["ok"]:
+                    return self._err(
+                        f"create_or_update_user insert failed: {insert_norm['error']}"
+                    )
+            # Finally select the row to return what we have in DB
+            final = self.get_user(user_id=user_id, whatsapp_id=whatsapp_id)
+            return final
+        except Exception as e:
+            return self._err(f"create_or_update_user fallback error: {e}")
+
+    def delete_user(
+        self, user_id: Optional[int] = None, whatsapp_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Delete a user by id or whatsapp_id.
+        """
+        if not user_id and not whatsapp_id:
+            return self._err("delete_user requires either user_id or whatsapp_id")
+
+        q = self.db.table("users")
+        if user_id:
+            q = q.delete().eq("id", user_id)
+        else:
+            q = q.delete().eq("whatsapp_id", whatsapp_id)
 
         try:
-            raw = await asyncio.to_thread(_run_db, fn, *args, **kwargs)
-            parsed = _parse_supabase_response(raw)
-            parsed["diagnostics"] = {
-                "called": getattr(fn, "__name__", str(fn)),
-                "raw_repr": str(raw)[:1000],
-            }
-            return parsed
-        except Exception as exc:
-            logger.exception("DB call failed: %s", exc)
-            return {
-                "ok": False,
-                "error": str(exc),
-                "diagnostics": {"fn": getattr(fn, "__name__", str(fn))},
-            }
+            resp = q.execute()
+        except Exception as e:
+            return self._err(f"DB error during delete_user: {e}")
 
-    # Basic fetch
-    async def get_user_by_whatsapp_id(self, whatsapp_id: str) -> Dict[str, Any]:
-        """Get user by WhatsApp ID. Returns structured dict for diagnostics."""
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-
-        def _fn():
-            tbl = self.client.table("users")
-            # prefer single() if available, else filter+limit
-            try:
-                return tbl.select("*").eq("whatsapp_id", whatsapp_id).single().execute()
-            except Exception:
-                # fallback approach
-                try:
-                    return (
-                        tbl.select("*")
-                        .eq("whatsapp_id", whatsapp_id)
-                        .limit(1)
-                        .execute()
-                    )
-                except Exception as exc:
-                    raise
-
-        return await self._call_db(_fn)
-
-    async def create_user(
-        self, whatsapp_id: str, name: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Create or upsert a user. Returns diagnostics and created row if available."""
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-        user_data = {
-            "whatsapp_id": whatsapp_id,
-            "name": name or "Guest",
-            "onboarding_step": 0,
-            "created_at": datetime.utcnow().isoformat(),
-            "last_active": datetime.utcnow().isoformat(),
-        }
-
-        def _fn(data):
-            tbl = self.client.table("users")
-            # some supabase clients allow upsert(...).select().execute() while others don't.
-            try:
-                # Try the more modern form
-                return tbl.upsert(data, on_conflict="whatsapp_id").execute()
-            except Exception:
-                # Some older clients returned a query builder that accepts 'upsert' and then `execute()` only.
-                return tbl.upsert(data, on_conflict="whatsapp_id").execute()
-
-        res = await self._call_db(_fn, user_data)
-        # Normalize extracted single row result into res['result']
-        if res.get("ok") and res.get("data"):
-            # data may be a list or single dict
-            data = res.get("data")
-            if isinstance(data, list) and len(data) > 0:
-                res["result"] = data[0]
-            else:
-                res["result"] = data
-        return res
-
-    async def update_user_onboarding_step(
-        self, user_id: int, step: Optional[int]
-    ) -> Dict[str, Any]:
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-
-        def _fn():
-            return (
-                self.client.table("users")
-                .update(
-                    {
-                        "onboarding_step": step,
-                        "last_active": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", user_id)
-                .execute()
-            )
-
-        return await self._call_db(_fn)
-
-    async def update_user_name_and_onboarding_step(
-        self, user_id: int, name: str, step: Optional[int]
-    ) -> Dict[str, Any]:
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-
-        def _fn():
-            return (
-                self.client.table("users")
-                .update(
-                    {
-                        "name": name,
-                        "onboarding_step": step,
-                        "last_active": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", user_id)
-                .execute()
-            )
-
-        return await self._call_db(_fn)
-
-    async def update_user_diet_and_onboarding_step(
-        self, user_id: int, diet: str, step: Optional[int]
-    ) -> Dict[str, Any]:
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-
-        def _fn():
-            return (
-                self.client.table("users")
-                .update(
-                    {
-                        "diet": diet,
-                        "onboarding_step": step,
-                        "last_active": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", user_id)
-                .execute()
-            )
-
-        return await self._call_db(_fn)
-
-    async def update_user_cuisine_and_onboarding_step(
-        self, user_id: int, cuisine: str, step: Optional[int]
-    ) -> Dict[str, Any]:
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-
-        def _fn():
-            return (
-                self.client.table("users")
-                .update(
-                    {
-                        "cuisine_pref": cuisine,
-                        "onboarding_step": step,
-                        "last_active": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", user_id)
-                .execute()
-            )
-
-        return await self._call_db(_fn)
-
-    async def update_user_allergies_and_onboarding_step(
-        self, user_id: int, allergies: List[str], step: Optional[int]
-    ) -> Dict[str, Any]:
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-
-        def _fn():
-            return (
-                self.client.table("users")
-                .update(
-                    {
-                        "allergies": allergies,
-                        "onboarding_step": step,
-                        "last_active": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", user_id)
-                .execute()
-            )
-
-        return await self._call_db(_fn)
-
-    async def update_user_household_and_complete_onboarding(
-        self, user_id: int, household_size: str
-    ) -> Dict[str, Any]:
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-
-        def _fn():
-            return (
-                self.client.table("users")
-                .update(
-                    {
-                        "household_size": household_size,
-                        "onboarding_step": None,
-                        "last_active": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", user_id)
-                .execute()
-            )
-
-        return await self._call_db(_fn)
-
-    async def upsert_user(
-        self, whatsapp_id: str, user_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Generic upsert wrapper - merges whatsapp_id into the payload."""
-        if self.client is None:
-            return {"ok": False, "error": "no_supabase_client"}
-        user_data["whatsapp_id"] = whatsapp_id
-        user_data["last_active"] = datetime.utcnow().isoformat()
-
-        def _fn(data):
-            return (
-                self.client.table("users")
-                .upsert(data, on_conflict="whatsapp_id")
-                .execute()
-            )
-
-        res = await self._call_db(_fn, user_data)
-        if res.get("ok") and res.get("data"):
-            data = res.get("data")
-            res["result"] = data[0] if isinstance(data, list) and data else data
-        return res
+        norm = self._normalize_response(resp)
+        if not norm["ok"]:
+            return self._err(f"delete_user db error: {norm['error']}")
+        return self._ok(norm["data"])

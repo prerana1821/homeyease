@@ -1,12 +1,10 @@
-# app/api/twilio_webhook.py
 """
 Twilio webhook endpoints for receiving WhatsApp messages via Twilio only.
 
-- No external adapter dependency.
-- No SMS routes.
 - Returns TwiML (empty) to Twilio by default.
 - If ?debug=1 is added, returns verbose JSON diagnostics for local testing.
 """
+
 from __future__ import annotations
 
 import collections
@@ -22,20 +20,28 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.encoders import jsonable_encoder
 
-from app.services.message_handler import MessageHandler
-from app.config.settings import settings
 from app.config.supabase import supabase_client
+from app.services.user_service import UserService
+from app.services.onboarding_service import OnboardingService
+from app.services.message_handler import MessageHandler
 from app.services.twilio_client import TwilioClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Singletons
-message_handler = MessageHandler()
+# --- Service singletons ---
+_user_service = UserService(supabase_client)
+_onboarding_service = OnboardingService(_user_service)
+message_handler = MessageHandler(
+    db_client=supabase_client,
+    user_service=_user_service,
+    onboarding_service=_onboarding_service,
+)
+
 twilio_client = TwilioClient()
 
 
-# Deduper for Twilio retries (MessageSid)
+# Deduper for Twilio retries
 class InMemoryDeduper:
 
     def __init__(self, max_entries: int = 4096) -> None:
@@ -55,13 +61,6 @@ class InMemoryDeduper:
 
     def contains(self, key: str) -> bool:
         return key in self._set
-
-    def count(self) -> int:
-        return len(self._set)
-
-    @property
-    def capacity(self) -> int:
-        return self._max_entries
 
 
 deduper = InMemoryDeduper()
@@ -105,11 +104,11 @@ def _build_internal_message_from_twilio_form(
     num_media = declared_num_media or int(form.get("NumMedia") or 0)
 
     message: Dict[str, Any] = {
-        "from": from_phone,
+        "whatsapp_id": from_phone,
         "id": msg_id,
         "timestamp": str(int(time.time())),
         "type": "text",
-        "text": {"body": body_text} if body_text else None,
+        "text": body_text if body_text else None,
         "raw": {k: form.get(k) for k in form.keys() if k},
     }
 
@@ -124,7 +123,7 @@ def _build_internal_message_from_twilio_form(
     if urls:
         mime = _guess_mime_from_url(urls[0])
         if not body_text:
-            message.pop("text", None)
+            message["text"] = None
         if mime.startswith("image/"):
             message["type"] = "image"
             message["image"] = {"urls": urls, "mime_type": mime, "count": len(urls)}
@@ -139,7 +138,6 @@ def _build_internal_message_from_twilio_form(
 
 
 def _make_json_serializable(obj: Any) -> Any:
-    """Convert objects to JSON-serializable primitives recursively."""
     if obj is None or isinstance(obj, (str, bool, int, float)):
         return obj
     if isinstance(obj, (datetime.date, datetime.datetime)):
@@ -167,11 +165,6 @@ async def handle_whatsapp_webhook(
     NumMedia: Optional[str] = Form("0"),
     debug: Optional[bool] = False,
 ) -> Response:
-    """
-    Twilio webhook for WhatsApp.
-    Use ?debug=1 to get JSON diagnostics instead of TwiML.
-    """
-    start_ts = time.time()
     diagnostics: Dict[str, Any] = {"steps": [], "errors": []}
 
     try:
@@ -216,23 +209,10 @@ async def handle_whatsapp_webhook(
         )
         diagnostics["steps"].append("converted_to_internal")
 
-        webhook_payload = {
-            "entry": [
-                {
-                    "id": "twilio_entry",
-                    "changes": [
-                        {
-                            "field": "messages",
-                            "value": {"messages": [incoming_message]},
-                        }
-                    ],
-                }
-            ]
-        }
-
         try:
-            await message_handler.process_webhook(webhook_payload)
+            handler_result = message_handler.handle_incoming_message(incoming_message)
             diagnostics["steps"].append("processed")
+            diagnostics["handler_result"] = _make_json_serializable(handler_result)
         except Exception as exc:
             diagnostics["errors"].append(str(exc))
             logger.exception("Error processing webhook payload")
@@ -248,13 +228,18 @@ async def handle_whatsapp_webhook(
 
         if debug:
             return JSONResponse(
-                {"status": "ok", "message_sid": message_sid, "diagnostics": diagnostics}
+                {
+                    "status": "ok",
+                    "message_sid": message_sid,
+                    "diagnostics": diagnostics,
+                }
             )
 
         return Response(
             content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
             media_type="application/xml",
         )
+
     except Exception as exc:
         diagnostics["errors"].append(str(exc))
         logger.exception("Unhandled exception in Twilio webhook")
@@ -274,16 +259,15 @@ async def handle_whatsapp_webhook(
 # -------------------------
 @router.get("/test")
 async def test_twilio_webhook(request: Request):
-    """Diagnostics for Supabase + Twilio + environment flags."""
     diagnostics: Dict[str, Any] = {}
-    start = asyncio.get_running_loop().time()
     diagnostics["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # Supabase health
     try:
         loop = asyncio.get_running_loop()
         db_ok = await asyncio.wait_for(
-            loop.run_in_executor(None, supabase_client.health_check), timeout=5.0
+            loop.run_in_executor(None, supabase_client.health_check),
+            timeout=5.0,
         )
         diagnostics["supabase"] = {"healthy": bool(db_ok)}
     except Exception as exc:
@@ -291,12 +275,12 @@ async def test_twilio_webhook(request: Request):
 
     # Twilio health
     try:
-        diag = await twilio_client.test_connection()
+        diag = await twilio_client.async_test_connection()
         diagnostics["twilio"] = _make_json_serializable(diag)
     except Exception as exc:
         diagnostics["twilio"] = {"ok": False, "error": str(exc)}
 
-    # Environment flags
+    # Env flags
     diagnostics["env"] = {
         "supabase_url_set": bool(os.getenv("SUPABASE_URL")),
         "supabase_key_set": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
@@ -307,8 +291,4 @@ async def test_twilio_webhook(request: Request):
     }
 
     diagnostics["service"] = {"name": "mambo-bot", "version": "1.0.0"}
-    diagnostics["uptime_estimate_seconds"] = round(
-        asyncio.get_running_loop().time() - start, 3
-    )
-
     return JSONResponse(content=_make_json_serializable(diagnostics))
