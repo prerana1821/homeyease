@@ -1,149 +1,137 @@
+# app/services/twilio_client.py
 """
-Twilio client for SMS/WhatsApp messaging as an alternative to WhatsApp Cloud API.
-This provides a fallback communication channel and can be used for testing.
+Twilio client wrapper - Twilio (sync) client but returns structured primitives.
 """
 import os
-from typing import Dict, Any, Optional
+import logging
+from typing import Dict, Any, List, Optional
+
 from twilio.rest import Client
-from twilio.base.exceptions import TwilioException
+from twilio.base.exceptions import TwilioException, TwilioRestException
 from app.config.settings import settings
 
+logger = logging.getLogger(__name__)
+
+
 class TwilioClient:
+
     def __init__(self):
-        self.client = None
+        self._client = None
         self.from_number = settings.twilio_phone_number
         self._initialize_client()
-    
-    def _initialize_client(self):
-        """Initialize Twilio client."""
+
+    @property
+    def client(self):
+        """Public compatibility alias - some code expects .client attribute."""
+        return self._client
+
+    def _initialize_client(self) -> None:
         try:
-            if not settings.twilio_account_sid or not settings.twilio_auth_token:
-                print("⚠️ Twilio credentials not available")
+            sid = settings.twilio_account_sid
+            token = settings.twilio_auth_token
+            if not sid or not token:
+                logger.warning("Twilio credentials not available")
+                self._client = None
                 return
-            
-            self.client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-            print("✅ Twilio client initialized")
-            
-        except Exception as e:
-            print(f"❌ Failed to initialize Twilio client: {e}")
-            self.client = None
-    
-    async def send_sms(self, to_phone: str, message: str) -> bool:
-        """Send SMS message via Twilio."""
-        if not self.client or not self.from_number:
-            print("❌ Twilio client or phone number not available")
-            return False
-        
+            self._client = Client(sid, token)
+            logger.info("Twilio client initialized")
+        except Exception as exc:
+            logger.exception("Failed to initialize Twilio client: %s", exc)
+            self._client = None
+
+    def _format_whatsapp_number(self, phone: str) -> str:
+        """Return a string like 'whatsapp:+1234567890'"""
+        phone_clean = phone.strip()
+        if not phone_clean.startswith("whatsapp:"):
+            phone_clean = f"whatsapp:{phone_clean}"
+        return phone_clean
+
+    def test_connection(self) -> Dict[str, Any]:
+        """Test Twilio connection and return a JSON-serializable dict."""
+        if not self._client:
+            return {"ok": False, "error": "no_client"}
         try:
-            message = self.client.messages.create(
-                body=message,
-                from_=self.from_number,
-                to=to_phone
+            account = self._client.api.accounts(settings.twilio_account_sid).fetch()
+            account_info = {
+                "friendly_name": getattr(account, "friendly_name", None),
+                "sid": getattr(account, "sid", None),
+            }
+            return {"ok": True, "account": account_info}
+        except Exception as exc:
+            logger.exception("Twilio test_connection failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def send_whatsapp_message(self, to_phone: str, message: str) -> Dict[str, Any]:
+        """Send a WhatsApp text message using Twilio. Returns dict with parsed error on failure."""
+        if not self._client or not self.from_number:
+            return {"ok": False, "error": "twilio_not_configured"}
+
+        try:
+            from_ = (
+                f"whatsapp:{self.from_number}"
+                if not self.from_number.startswith("whatsapp:")
+                else self.from_number
             )
-            print(f"✅ SMS sent successfully. SID: {message.sid}")
-            return True
-            
-        except TwilioException as e:
-            print(f"❌ Twilio error: {e}")
-            return False
-        except Exception as e:
-            print(f"❌ Error sending SMS: {e}")
-            return False
-    
-    async def send_whatsapp_message(self, to_phone: str, message: str) -> bool:
-        """Send WhatsApp message via Twilio (requires WhatsApp Business API setup)."""
-        if not self.client or not self.from_number:
-            print("❌ Twilio client or phone number not available")
-            return False
-        
-        try:
-            # Format phone numbers for WhatsApp
-            whatsapp_from = f"whatsapp:{self.from_number}"
-            whatsapp_to = f"whatsapp:{to_phone}"
-            
-            message = self.client.messages.create(
-                body=message,
-                from_=whatsapp_from,
-                to=whatsapp_to
+            to_ = self._format_whatsapp_number(to_phone)
+            logger.debug("Twilio send: from=%s to=%s", from_, to_)
+            msg = self._client.messages.create(body=message, from_=from_, to=to_)
+            return {
+                "ok": True,
+                "details": {
+                    "sid": getattr(msg, "sid", None),
+                    "status": getattr(msg, "status", None),
+                },
+            }
+        except TwilioRestException as exc:
+            # TwilioRestException exposes .code and .msg on some versions
+            code = getattr(exc, "code", None)
+            status = getattr(exc, "status", None)
+            msg_text = str(exc)
+            parsed = {
+                "ok": False,
+                "error": msg_text,
+                "twilio_code": code,
+                "http_status": status,
+            }
+            # Friendly hint for the common case 63007
+            if code == 63007:
+                parsed["hint"] = (
+                    "From address is not a registered WhatsApp channel. Use the Twilio WhatsApp sandbox number or register your WhatsApp sender in the Twilio Console."
+                )
+            logger.warning(
+                "TwilioRestException when sending WhatsApp message: %s", parsed
             )
-            print(f"✅ WhatsApp message sent successfully. SID: {message.sid}")
-            return True
-            
-        except TwilioException as e:
-            print(f"❌ Twilio WhatsApp error: {e}")
-            return False
-        except Exception as e:
-            print(f"❌ Error sending WhatsApp message: {e}")
-            return False
-    
-    async def send_meal_recommendations_sms(self, to_phone: str, recommendations: list) -> bool:
-        """Send meal recommendations via SMS with proper formatting."""
-        if not recommendations:
-            message = "Mambo 🤔: I'm still learning about your taste! Could you try asking for something specific?"
-            return await self.send_sms(to_phone, message)
-        
-        # Format recommendations for SMS
-        context = recommendations[0].get('context', 'Here are some meal suggestions')
-        message = f"Mambo 🍽️: {context}:\n\n"
-        
-        for i, meal in enumerate(recommendations[:3], 1):  # Limit to 3 for SMS
-            name = meal.get('name', 'Unknown Dish')
-            cuisine = meal.get('cuisine', '').replace('_', ' ').title()
-            time_min = meal.get('estimated_time_min', 0)
-            diet = meal.get('diet_type', '')
-            
-            # Format time
-            time_text = f" ({time_min} min)" if time_min else ""
-            
-            # Format diet indicator
-            diet_emoji = "🌱" if diet == "veg" else "🍗" if diet == "non-veg" else ""
-            
-            message += f"{i}. {name} {diet_emoji}\n"
-            message += f"   {cuisine} cuisine{time_text}\n\n"
-        
-        # Add follow-up suggestion
-        message += "Reply 'recipe [dish name]' for full recipe! 👨‍🍳"
-        
-        return await self.send_sms(to_phone, message)
-    
-    async def send_onboarding_question_sms(self, to_phone: str, question_type: str, user_name: str = None) -> bool:
-        """Send onboarding questions via SMS."""
-        messages = {
-            "name": "Mambo 🥘: Hey! I'm Mambo — your kitchen sidekick. What should I call you? (Just reply with your name or 'skip')",
-            "diet": f"Mambo 🌿🍗: Hi {user_name or 'there'}! What's your food base? Reply:\n1 - Veg 🌱\n2 - Non-Veg 🍗\n3 - Both 🍴",
-            "cuisine": "Mambo 🍽️: Pick your kitchen vibe! Reply with number:\n1-North Indian 2-South Indian 3-Chinese 4-Italian 5-Punjabi 6-Gujarati 7-Bengali 8-International 9-Surprise me",
-            "allergies": "Mambo 🩺: Any allergies I should avoid? Reply with number(s):\n1-None 2-Dairy 3-Eggs 4-Peanut 5-Tree nuts 6-Wheat/Gluten 7-Soy 8-Fish 9-Shellfish 10-Other",
-            "household": "Mambo 🏡: Who are you cooking for? Reply:\n1-Just me 2-Couple 3-Small family(3-4) 4-Big family(5+) 5-Shared/Varies"
-        }
-        
-        message = messages.get(question_type, "Mambo: Please provide your preference.")
-        return await self.send_sms(to_phone, message)
-    
-    def format_phone_number(self, phone: str) -> str:
-        """Format phone number for Twilio (ensure E.164 format)."""
-        # Remove any non-digit characters except +
-        cleaned = ''.join(c for c in phone if c.isdigit() or c == '+')
-        
-        # Add + if not present
-        if not cleaned.startswith('+'):
-            # Assume US number if no country code
-            if len(cleaned) == 10:
-                cleaned = '+1' + cleaned
-            else:
-                cleaned = '+' + cleaned
-        
-        return cleaned
-    
-    async def test_connection(self) -> bool:
-        """Test Twilio connection."""
-        if not self.client:
-            return False
-        
+            return parsed
+        except Exception as exc:
+            logger.exception("Unexpected error sending WhatsApp message: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def send_media_message(
+        self, to_phone: str, media_urls: List[str], body: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Send media via WhatsApp (Twilio). Returns dict."""
+        if not self._client or not self.from_number:
+            return {"ok": False, "error": "twilio_not_configured"}
         try:
-            # Try to fetch account info
-            account = self.client.api.accounts(settings.twilio_account_sid).fetch()
-            print(f"✅ Twilio connection test successful. Account: {account.friendly_name}")
-            return True
-        except Exception as e:
-            print(f"❌ Twilio connection test failed: {e}")
-            return False
+            from_ = (
+                f"whatsapp:{self.from_number}"
+                if not self.from_number.startswith("whatsapp:")
+                else self.from_number
+            )
+            to_ = self._format_whatsapp_number(to_phone)
+            msg = self._client.messages.create(
+                body=body or "", from_=from_, to=to_, media_url=media_urls
+            )
+            return {
+                "ok": True,
+                "details": {
+                    "sid": getattr(msg, "sid", None),
+                    "status": getattr(msg, "status", None),
+                },
+            }
+        except TwilioException as exc:
+            logger.exception("Twilio media send failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.exception("Error sending media message: %s", exc)
+            return {"ok": False, "error": str(exc)}

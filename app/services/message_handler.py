@@ -1,186 +1,173 @@
 """
 Message handler service for processing WhatsApp messages.
+Constructs TwilioMessageHandler first and injects it into OnboardingService
+to avoid circular imports.
 """
+
 import json
+import logging
 from typing import Dict, Any, List
+
+from app.services.twilio_message_handler import TwilioMessageHandler
 from app.services.onboarding_service import OnboardingService
 from app.services.intent_classifier import IntentClassifier
 from app.services.twilio_client import TwilioClient
 from app.services.recommendation_service import RecommendationService
 from app.services.image_service import ImageService
 
+logger = logging.getLogger(__name__)
+
+
 class MessageHandler:
+
     def __init__(self):
-        self.onboarding_service = OnboardingService()
+        # Initialize Twilio-aware sender first to inject into onboarding service
+        self.twilio_sender = TwilioMessageHandler()
+        # OnboardingService receives the sender instance (duck-typed)
+        self.onboarding_service = OnboardingService(message_sender=self.twilio_sender)
+        # Other services (they may be network-bound; instantiate after sender)
         self.intent_classifier = IntentClassifier()
-        self.twilio_client = TwilioClient()
+        self.twilio_client = (
+            TwilioClient()
+        )  # low-level client still available if needed
         self.recommendation_service = RecommendationService()
         self.image_service = ImageService()
-    
-    async def process_webhook(self, webhook_data: Dict[str, Any]) -> None:
-        """Process incoming webhook data from WhatsApp."""
+
+    async def process_webhook(self, webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process incoming webhook data from WhatsApp.
+
+        Returns structured diagnostics so the caller (webhook) can include debug info.
+        """
+        diagnostics = {"processed": 0, "errors": []}
         try:
-            # Extract message data from webhook
             for entry in webhook_data.get("entry", []):
                 for change in entry.get("changes", []):
                     if change.get("field") == "messages":
-                        await self._handle_message_change(change["value"])
+                        res = await self._handle_message_change(change["value"])
+                        diagnostics["processed"] += 1
+                        if res:
+                            diagnostics.setdefault("results", []).append(res)
+            return {"ok": True, "diagnostics": diagnostics}
         except Exception as e:
-            print(f"Error processing webhook: {e}")
-            raise
-    
-    async def _handle_message_change(self, message_data: Dict[str, Any]) -> None:
-        """Handle individual message changes."""
-        # Extract messages
+            logger.exception("Error processing webhook: %s", e)
+            diagnostics["errors"].append(str(e))
+            return {"ok": False, "error": str(e), "diagnostics": diagnostics}
+
+    async def _handle_message_change(
+        self, message_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
         messages = message_data.get("messages", [])
-        
+        results = []
         for message in messages:
-            await self._process_single_message(message)
-    
-    async def _process_single_message(self, message: Dict[str, Any]) -> None:
-        """Process a single WhatsApp message."""
-        # Extract basic message info
+            r = await self._process_single_message(message)
+            results.append(r)
+        return {"ok": True, "results": results}
+
+    async def _process_single_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
         sender_phone = message.get("from")
         message_type = message.get("type")
-        
         if not sender_phone:
-            return
-        
-        # Check if user is in onboarding flow
-        user_onboarding_step = await self.onboarding_service.get_user_onboarding_step(sender_phone)
-        
-        if user_onboarding_step is not None and user_onboarding_step < 5:
-            # User is in onboarding flow
-            await self.onboarding_service.handle_onboarding_message(sender_phone, message)
-        else:
-            # User has completed onboarding, process normal messages
-            await self._handle_post_onboarding_message(sender_phone, message)
-    
-    async def _handle_post_onboarding_message(self, sender_phone: str, message: Dict[str, Any]) -> None:
-        """Handle messages after onboarding is complete."""
-        message_type = message.get("type")
-        
+            return {"ok": False, "error": "no_sender"}
+        # Ask onboarding service for step
+        user_step = await self.onboarding_service.get_user_onboarding_step(sender_phone)
+        # If user_step is None -> not in DB or error; onboarding_service.handle will auto-start
         try:
-            if message_type == "text":
+            if user_step is None or (isinstance(user_step, int) and user_step < 5):
+                # user is in onboarding (or missing) -> let onboarding service handle it
+                res = await self.onboarding_service.handle_onboarding_message(
+                    sender_phone, message
+                )
+                return {"ok": True, "path": "onboarding", "result": res}
+            else:
+                # post-onboarding flow
+                await self._handle_post_onboarding_message(sender_phone, message)
+                return {"ok": True, "path": "post_onboarding"}
+        except Exception as exc:
+            logger.exception("Error processing single message: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    # POST-onboarding handlers (delegate to twilio_sender when replying)
+    async def _handle_post_onboarding_message(
+        self, sender_phone: str, message: Dict[str, Any]
+    ) -> None:
+        mtype = message.get("type")
+        try:
+            if mtype == "text":
                 await self._handle_text_message(sender_phone, message)
-            elif message_type == "image":
+            elif mtype in ("image", "media"):
                 await self._handle_image_message(sender_phone, message)
-            elif message_type == "interactive":
+            elif mtype == "interactive":
                 await self._handle_interactive_message(sender_phone, message)
             else:
-                # Send a helpful response for unsupported message types
-                await self.twilio_client.send_sms(
+                await self.twilio_sender.send_text(
                     sender_phone,
-                    "Mambo 🤖: I can help with meal suggestions! Just ask me what you'd like to eat, send a food photo, or ask for recipes. What can I help you cook today?"
+                    "Mambo 🤖: I can help with meal suggestions! Ask what you'd like to eat or send a photo.",
                 )
-        except Exception as e:
-            print(f"Error handling post-onboarding message: {e}")
-            await self.twilio_client.send_sms(
-                sender_phone,
-                "Mambo 😅: Sorry, I had a little hiccup. Could you try asking again? I'm here to help with your meals!"
+        except Exception as exc:
+            logger.exception("post_onboarding handler failed: %s", exc)
+            await self.twilio_sender.send_text(
+                sender_phone, "Sorry — something went wrong. Try again in a moment."
             )
-    
-    async def _handle_text_message(self, sender_phone: str, message: Dict[str, Any]) -> None:
-        """Handle text messages and provide meal recommendations."""
-        text_content = message.get("text", {}).get("body", "").strip()
-        
+
+    async def _handle_text_message(
+        self, sender_phone: str, message: Dict[str, Any]
+    ) -> None:
+        text_content = (message.get("text") or {}).get("body", "").strip()
         if not text_content:
+            await self.twilio_sender.send_text(
+                sender_phone, "I didn't get that — please type what you'd like."
+            )
             return
-        
-        # Get meal recommendations based on message
+        # classify intent (best-effort)
+        try:
+            intent = await self.intent_classifier.classify_intent(text_content)
+        except Exception:
+            intent = None
+        # If user asks for recipe or pantry, call recommendation service
         recommendations = await self.recommendation_service.get_meal_recommendations(
             sender_phone, text_content, max_results=3
         )
-        
-        # Format and send response
-        await self._send_meal_recommendations(sender_phone, recommendations, text_content)
-    
-    async def _handle_image_message(self, sender_phone: str, message: Dict[str, Any]) -> None:
-        """Handle image messages for ingredient detection."""
-        try:
-            # Extract image information from WhatsApp message
-            image_info = message.get("image", {})
-            image_id = image_info.get("id")
-            
-            if not image_id:
-                await self.twilio_client.send_sms(
-                    sender_phone,
-                    "Mambo 📸: I couldn't process that image. Could you try sending it again or tell me what ingredients you have?"
-                )
-                return
-            
-            # Send immediate acknowledgment
-            await self.twilio_client.send_sms(
-                sender_phone,
-                "Mambo 📸: Let me analyze your photo to identify ingredients... This might take a moment!"
-            )
-            
-            # For now, since we can't directly access WhatsApp media without proper setup,
-            # we'll use the fallback approach and ask for text description
-            ingredient_suggestions = await self.image_service.get_ingredient_suggestions([])
-            
-            response_text = (
-                "Mambo 🔍: I'm still learning to analyze photos directly! "
-                "Could you tell me what ingredients you see in the image? "
-                "For example: 'I have tomatoes, onions, and chicken' - "
-                "then I can suggest some amazing meals you can make! 👨‍🍳"
-            )
-            
-            await self.twilio_client.send_sms(sender_phone, response_text)
-            
-        except Exception as e:
-            print(f"Error handling image message: {e}")
-            await self.twilio_client.send_sms(
-                sender_phone,
-                "Mambo 📸: I had trouble with that image. Could you tell me what ingredients you have instead? I'll suggest some great meals!"
-            )
-    
-    async def _handle_interactive_message(self, sender_phone: str, message: Dict[str, Any]) -> None:
-        """Handle interactive button/list responses."""
-        # This could be used for follow-up questions or meal selections
-        await self.twilio_client.send_sms(
-            sender_phone,
-            "Mambo ✨: Got it! What else can I help you cook today?"
-        )
-    
-    async def _send_meal_recommendations(self, sender_phone: str, recommendations: List[Dict[str, Any]], original_message: str) -> None:
-        """Format and send meal recommendations to user."""
+        # Format and send compact message (use twilio_sender)
         if not recommendations:
-            await self.twilio_client.send_sms(
-                sender_phone,
-                "Mambo 🤔: I'm still learning about your taste! Could you try asking for something specific like 'suggest dinner' or 'what can I make with rice'?"
+            await self.twilio_sender.send_text(
+                sender_phone, "I couldn't find suggestions — try giving ingredients."
             )
             return
-        
-        # Create response message
-        context = recommendations[0].get('context', 'Here are some meal suggestions')
-        response_text = f"Mambo 🍽️: {context}:\n\n"
-        
-        for i, meal in enumerate(recommendations, 1):
-            name = meal.get('name', 'Unknown Dish')
-            cuisine = meal.get('cuisine', '').replace('_', ' ').title()
-            time_min = meal.get('estimated_time_min', 0)
-            diet = meal.get('diet_type', '')
-            
-            # Format time
-            time_text = f" ({time_min} min)" if time_min else ""
-            
-            # Format diet indicator
-            diet_emoji = "🌱" if diet == "veg" else "🍗" if diet == "non-veg" else ""
-            
-            response_text += f"{i}. *{name}* {diet_emoji}\n"
-            response_text += f"   {cuisine} cuisine{time_text}\n"
-            
-            # Add recipe hint if available
-            recipe = meal.get('recipe_text', '')
-            if recipe:
-                recipe_short = recipe[:80] + "..." if len(recipe) > 80 else recipe
-                response_text += f"   💡 {recipe_short}\n"
-            
-            response_text += "\n"
-        
-        # Add follow-up suggestion
-        response_text += "Want the full recipe for any of these? Just ask 'recipe for [dish name]' 👨‍🍳"
-        
-        # Send the recommendation
-        await self.twilio_client.send_sms(sender_phone, response_text)
+
+        # Compose short message and attach first image if available
+        lines = []
+        media = []
+        for i, r in enumerate(recommendations[:4], 1):
+            name = r.get("name") or r.get("title") or "Dish"
+            cuisine = (r.get("cuisine") or "").replace("_", " ").title()
+            time_min = r.get("estimated_time_min")
+            lines.append(
+                f"{i}. {name} — {cuisine}" + (f" ({time_min} min)" if time_min else "")
+            )
+            if not media and r.get("image_url"):
+                media.append(r.get("image_url"))
+        text_body = (
+            "Here are some meal ideas:\n"
+            + "\n".join(lines)
+            + "\nReply 'recipe [name]' for full recipe."
+        )
+        if media:
+            await self.twilio_sender.send_media(sender_phone, media, body=text_body)
+        else:
+            await self.twilio_sender.send_text(sender_phone, text_body)
+
+    async def _handle_image_message(
+        self, sender_phone: str, message: Dict[str, Any]
+    ) -> None:
+        await self.twilio_sender.send_text(
+            sender_phone,
+            "Nice photo! Would you like me to try analyzing it? Reply 'yes' or tell me the ingredients.",
+        )
+        # further processing could be added here
+
+    async def _handle_interactive_message(
+        self, sender_phone: str, message: Dict[str, Any]
+    ) -> None:
+        await self.twilio_sender.send_text(
+            sender_phone, "Got your selection — I'll update your preferences."
+        )
