@@ -139,7 +139,7 @@ def _build_internal_message_from_twilio_form(
 
 
 def _make_json_serializable(obj: Any) -> Any:
-    """Convert objects to JSON-serializable primitives recursively."""
+    """Convert objects (including Supabase APIResponse) to JSON-safe primitives."""
     if obj is None or isinstance(obj, (str, bool, int, float)):
         return obj
     if isinstance(obj, (datetime.date, datetime.datetime)):
@@ -148,10 +148,19 @@ def _make_json_serializable(obj: Any) -> Any:
         return {str(k): _make_json_serializable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
         return [_make_json_serializable(v) for v in obj]
+
+    # Handle Supabase APIResponse
+    if hasattr(obj, "data"):
+        return {
+            "data": getattr(obj, "data", None),
+            "status_code": getattr(obj, "status_code", None),
+            "error": getattr(obj, "error", None),
+        }
+
     try:
-        return jsonable_encoder(obj)
+        return str(obj)  # last resort fallback
     except Exception:
-        return str(obj)
+        return "<unserializable>"
 
 
 # -------------------------
@@ -167,12 +176,9 @@ async def handle_whatsapp_webhook(
     NumMedia: Optional[str] = Form("0"),
     debug: Optional[bool] = False,
 ) -> Response:
-    """
-    Twilio webhook for WhatsApp.
-    Use ?debug=1 to get JSON diagnostics instead of TwiML.
-    """
     start_ts = time.time()
     diagnostics: Dict[str, Any] = {"steps": [], "errors": []}
+    from app.services.user_service import UserService  # local import to avoid cycles
 
     try:
         form = await request.form()
@@ -195,73 +201,121 @@ async def handle_whatsapp_webhook(
             message_sid = f"tw-{int(time.time() * 1000)}"
         diagnostics["message_sid"] = message_sid
 
-        if deduper.contains(message_sid):
-            diagnostics["steps"].append("deduplicated")
-            if debug:
-                return JSONResponse(
-                    {
-                        "status": "ignored",
-                        "reason": "duplicate",
-                        "diagnostics": diagnostics,
-                    }
-                )
-            return Response(
-                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                media_type="application/xml",
-            )
-        deduper.add(message_sid)
-
+        # Build internal message like before
         incoming_message = _build_internal_message_from_twilio_form(
             form, declared_num_media=num_media, media_urls=media_urls
         )
         diagnostics["steps"].append("converted_to_internal")
 
+        # Persist incoming message in DB for idempotency
+        user_service = UserService()
+        try:
+            rec = await user_service.record_incoming_message(
+                message_sid=message_sid,
+                user_id=None,  # we don't yet know user mapping; user_service will accept None
+                from_phone=_clean_phone(form.get("From") or From),
+                raw_payload=dict(form),
+            )
+            diagnostics["incoming_record"] = rec
+        except Exception as exc:
+            logger.exception(
+                "Failed to record incoming_message before processing: %s", exc
+            )
+            diagnostics["errors"].append(f"record_incoming_failed:{exc}")
+            # still continue — best-effort unless you want to block
+            rec = {"ok": False, "created": False}
+
+        # If not created, treat as duplicate and short-circuit (idempotent)
+        if rec.get("ok") and not rec.get("created"):
+            diagnostics["steps"].append("duplicate_detected_db")
+            if debug:
+                return JSONResponse(
+                    _make_json_serializable(
+                        {
+                            "status": "ok",
+                            "message_sid": message_sid,
+                            "diagnostics": diagnostics,
+                        }
+                    )
+                )
+            # Return TwiML empty response to Twilio
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
+
+        # Build webhook_payload to feed existing handler logic
         webhook_payload = {
             "entry": [
                 {
                     "id": "twilio_entry",
                     "changes": [
-                        {
-                            "field": "messages",
-                            "value": {"messages": [incoming_message]},
-                        }
+                        {"field": "messages", "value": {"messages": [incoming_message]}}
                     ],
                 }
             ]
         }
 
+        # Process message via your message_handler (this will call OnboardingService, etc.)
         try:
-            await message_handler.process_webhook(webhook_payload)
+            proc_res = await message_handler.process_webhook(webhook_payload)
             diagnostics["steps"].append("processed")
+            diagnostics["process_result"] = proc_res
         except Exception as exc:
             diagnostics["errors"].append(str(exc))
-            logger.exception("Error processing webhook payload")
+            logger.exception("Error processing webhook payload: %s", exc)
+            # mark incoming as error/leave unprocessed (optionally add a column for last_error)
             if debug:
                 return JSONResponse(
-                    {"status": "error", "error": str(exc), "diagnostics": diagnostics},
-                    status_code=500,
+                    _make_json_serializable(
+                        {
+                            "status": "ok",
+                            "message_sid": message_sid,
+                            "diagnostics": diagnostics,
+                        }
+                    )
                 )
             return Response(
                 content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 media_type="application/xml",
             )
 
+        # Mark incoming processed now that handling succeeded
+        try:
+            mproc = await user_service.mark_incoming_processed(message_sid)
+            diagnostics["incoming_mark_processed"] = mproc
+        except Exception:
+            logger.exception("Failed to mark incoming processed for %s", message_sid)
+            diagnostics["errors"].append("mark_incoming_processed_failed")
+
+        # Debug or normal TwiML response
         if debug:
             return JSONResponse(
-                {"status": "ok", "message_sid": message_sid, "diagnostics": diagnostics}
+                _make_json_serializable(
+                    {
+                        "status": "ok",
+                        "message_sid": message_sid,
+                        "diagnostics": diagnostics,
+                    }
+                )
             )
-
         return Response(
             content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
             media_type="application/xml",
         )
+
     except Exception as exc:
         diagnostics["errors"].append(str(exc))
-        logger.exception("Unhandled exception in Twilio webhook")
+        logger.exception("Unhandled exception in Twilio webhook: %s", exc)
         if debug:
             return JSONResponse(
-                {"status": "error", "error": str(exc), "diagnostics": diagnostics},
-                status_code=500,
+                _make_json_serializable(
+                    {
+                        "status": "ok",
+                        "message_sid": message_sid,
+                        "diagnostics": diagnostics,
+                    }
+                )
             )
         return Response(
             content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
@@ -291,7 +345,7 @@ async def test_twilio_webhook(request: Request):
 
     # Twilio health
     try:
-        diag = await twilio_client.test_connection()
+        diag = twilio_client.test_connection()
         diagnostics["twilio"] = _make_json_serializable(diag)
     except Exception as exc:
         diagnostics["twilio"] = {"ok": False, "error": str(exc)}

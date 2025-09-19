@@ -22,27 +22,25 @@ TEST_PHONE = os.getenv("TEST_PHONE", "+12345678901")  # use a safe test number
 class MamboBotTester:
 
     def __init__(self):
-        # Use one client for all tests
         self.client = httpx.AsyncClient(timeout=10.0)
         self.test_results = []
 
     async def log_test(self, name: str, ok: bool, details: str = ""):
         status = "✅ PASS" if ok else "❌ FAIL"
         print(f"{status} {name}{' - ' + details if details else ''}")
-        self.test_results.append(
-            {
-                "test": name,
-                "ok": ok,
-                "details": details,
-                "ts": datetime.utcnow().isoformat(),
-            }
-        )
+        self.test_results.append({
+            "test": name,
+            "ok": ok,
+            "details": details,
+            "ts": datetime.utcnow().isoformat(),
+        })
 
     async def test_health(self):
         print("\n🔍 Testing health endpoints...")
         try:
             r = await self.client.get(f"{BASE_URL}/")
-            await self.log_test("root", r.status_code == 200, f"status={r.status_code}")
+            await self.log_test("root", r.status_code == 200,
+                                f"status={r.status_code}")
         except Exception as e:
             await self.log_test("root", False, str(e))
 
@@ -71,7 +69,7 @@ class MamboBotTester:
         print(
             "\n🔍 Testing Twilio-form webhook (simulated incoming WhatsApp message)..."
         )
-        # Simulate Twilio form-encoded webhook for a new user (onboarding start).
+
         form = {
             "From": f"whatsapp:{TEST_PHONE}",
             "To": "whatsapp:+15550199202",
@@ -80,9 +78,8 @@ class MamboBotTester:
             "NumMedia": "0",
         }
         try:
-            r = await self.client.post(
-                f"{BASE_URL}/webhook/whatsapp?debug=1", data=form
-            )
+            r = await self.client.post(f"{BASE_URL}/webhook/whatsapp?debug=1",
+                                       data=form)
             ok = r.status_code == 200
             details = r.text[:400]
             await self.log_test(
@@ -93,7 +90,7 @@ class MamboBotTester:
         except Exception as e:
             await self.log_test("webhook_onboarding_form", False, str(e))
 
-        # Simulate a follow-up message (meal request)
+        # Follow-up meal request
         form2 = {
             "From": f"whatsapp:{TEST_PHONE}",
             "To": "whatsapp:+15550199202",
@@ -102,12 +99,14 @@ class MamboBotTester:
             "NumMedia": "0",
         }
         try:
-            r = await self.client.post(
-                f"{BASE_URL}/webhook/whatsapp?debug=1", data=form2
-            )
+            r = await self.client.post(f"{BASE_URL}/webhook/whatsapp?debug=1",
+                                       data=form2)
             ok = r.status_code == 200
+            details = r.text[:400]
             await self.log_test(
-                "webhook_meal_request_form", ok, f"status={r.status_code}"
+                "webhook_meal_request_form",
+                ok,
+                f"status={r.status_code} data_preview={details}",
             )
         except Exception as e:
             await self.log_test("webhook_meal_request_form", False, str(e))
@@ -115,32 +114,31 @@ class MamboBotTester:
     async def test_intent_classifier(self):
         print("\n🔍 Testing intent classifier (if available)...")
         try:
-            from app.services.intent_classifier import IntentClassifier  # may raise
+            from app.services.intent_classifier import IntentClassifier
 
             classifier = IntentClassifier()
             sample = "What should I eat for dinner?"
             try:
                 result = await classifier.classify_intent(sample)
-                await self.log_test("intent_classifier_basic", True, f"result={result}")
+                await self.log_test("intent_classifier_basic", True,
+                                    f"result={result}")
             except Exception as e:
                 await self.log_test("intent_classifier_basic", False, str(e))
         except Exception as e:
-            await self.log_test(
-                "intent_classifier_import", False, "not available or error: " + str(e)
-            )
+            await self.log_test("intent_classifier_import", False,
+                                "not available or error: " + str(e))
 
     async def test_database_ops(self):
-        print(
-            "\n🔍 Testing database operations via UserService (if Supabase configured)..."
-        )
+        print("\n🔍 Testing database operations via UserService...")
         try:
             from app.services.user_service import UserService
 
             user_svc = UserService()
-            # create user
-            res = await user_svc.create_user(TEST_PHONE, name="Test User")
-            ok = res.get("ok") and res.get("result") is not None
-            await self.log_test("user_create", ok, f"diag={res.get('diagnostics')}")
+            res = await user_svc.create_user(TEST_PHONE, name="Test prerana")
+            # Updated to check "user" key instead of "result"
+            ok = res.get("ok") and res.get("user") is not None
+            await self.log_test("user_create", ok,
+                                f"diag={res.get('diagnostics')}")
         except Exception as e:
             await self.log_test("user_create", False, str(e))
 

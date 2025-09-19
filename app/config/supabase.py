@@ -140,6 +140,7 @@ class SupabaseClient:
             # Prefer explicit failure checks:
             # - Some versions: res.error is set on error
             # - Some versions: res.status_code present
+
             if hasattr(res, "error") and res.error:
                 logger.warning(
                     "Supabase health_check returned error object: %s",
