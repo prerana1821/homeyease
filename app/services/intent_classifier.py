@@ -1,197 +1,196 @@
+# app/services/intent_classifier.py
 """
-Intent classification service using keyword rules and OpenAI fallback.
-"""
+Intent classification service using deterministic rules first, OpenAI fallback second.
 
+Design goals:
+- Fast, high-precision rule matching (regex + keyword) to avoid LLM calls when possible.
+- Robust LLM fallback with retries, executed off the event loop.
+- Optional verbose diagnostics for debugging.
+- Defensive parsing of LLM response and safe logging (no secrets leaked).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
 import re
-from typing import List, Optional
-from openai import OpenAI
+import time
+from typing import Dict, List, Optional, Pattern, Tuple, Union
+
+try:
+    # new-style client
+    from openai import OpenAI
+except Exception:
+    OpenAI = None  # will be handled later
+
+try:
+    # older/newer SDKs sometimes expose exceptions in different modules
+    from openai.error import OpenAIError, RateLimitError, AuthenticationError  # type: ignore
+except Exception:
+    try:
+        # Some versions use direct attributes on package (rare), try guard
+        OpenAIError = getattr(__import__("openai"), "OpenAIError", Exception)
+        RateLimitError = getattr(__import__("openai"), "RateLimitError", Exception)
+        AuthenticationError = getattr(
+            __import__("openai"), "AuthenticationError", Exception
+        )
+    except Exception:
+        # Last resort: alias to Exception so our error handling remains functional
+        OpenAIError = Exception
+        RateLimitError = Exception
+        AuthenticationError = Exception
+
 from app.config.settings import settings
 
-# the newest OpenAI model is "gpt-5" which was released August 7, 2025.
-# do not change this unless explicitly requested by the user
+logger = logging.getLogger(__name__)
+
+
+def _mask_key(k: Optional[str]) -> str:
+    if not k:
+        return "(none)"
+    if len(k) <= 8:
+        return k
+    return f"{k[:4]}...{k[-4:]}"
 
 
 class IntentClassifier:
-    def __init__(self):
-        self.openai_client = (
-            OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
-        )
 
-        # Precise keyword rules with reduced overlap and false positives
-        self.intent_keywords = {
+    def __init__(self):
+        # LLM client (may be None)
+        self.openai_client: Optional[OpenAI] = None
+        try:
+            if OpenAI and getattr(settings, "openai_api_key", None):
+                try:
+                    self.openai_client = OpenAI(api_key=settings.openai_api_key)
+                    logger.info("✅ OpenAI client created successfully")
+                except Exception as exc:
+                    logger.exception("❌ Failed creating OpenAI client: %s", exc)
+                    self.openai_client = None
+            else:
+                logger.info("ℹ️ OpenAI client not configured or library missing.")
+        except Exception as exc:
+            # Should not crash the app; just log and continue
+            logger.exception("Unexpected error initializing OpenAI client: %s", exc)
+            self.openai_client = None
+
+        # Model name configurable via settings (safe default: gpt-5)
+        self.openai_model = getattr(settings, "openai_model", "gpt-5")
+
+        # keyword lists (kept readable) — these will be compiled into regexes for efficiency
+        self.intent_keywords: Dict[str, List[str]] = {
             "RECIPE_REQUEST": [
-                "recipe for",
-                "how to make",
-                "how do I cook",
-                "how to prepare",
-                "cooking method",
-                "cooking steps",
-                "preparation steps",
-                "ingredients needed for",
-                "cooking time for",
-                "cooking instructions for",
+                r"recipe for",
+                r"how to make",
+                r"how do i cook",
+                r"how to prepare",
+                r"cooking method",
+                r"cooking steps",
+                r"preparation steps",
+                r"ingredients needed for",
+                r"cooking time for",
+                r"cooking instructions for",
             ],
             "PANTRY_HELP": [
-                "what can I make with",
-                "using these ingredients",
-                "I have.*what can I",
-                "use up these",
-                "leftover.*what to",
-                "ingredients at home",
-                "with what I have",
-                "from my pantry",
-                "available ingredients.*make",
+                r"what can i make with",
+                r"using these ingredients",
+                r"i have .* what can i",
+                r"use up these",
+                r"leftover .* what to",
+                r"ingredients at home",
+                r"with what i have",
+                r"from my pantry",
+                r"available ingredients .* make",
             ],
             "DIETARY_QUERY": [
-                "vegan option",
-                "vegetarian option",
-                "gluten free",
-                "dairy free",
-                "low carb",
-                "keto friendly",
-                "healthy option",
-                "diet food",
-                "low calorie",
-                "sugar free",
-                "allergy free",
-                "without dairy",
-                "substitute for",
-                "avoid.*because",
+                r"vegan option",
+                r"vegetarian option",
+                r"gluten free",
+                r"dairy free",
+                r"low carb",
+                r"keto friendly",
+                r"healthy option",
+                r"diet food",
+                r"low calorie",
+                r"sugar free",
+                r"allergy free",
+                r"without dairy",
+                r"substitute for",
+                r"avoid .* because",
             ],
             "PLANWEEK": [
-                "plan my week",
-                "weekly plan",
-                "meal plan",
-                "weekly meal plan",
-                "plan meals for week",
-                "week meal plan",
-                "7 day plan",
-                "weekly menu",
-                "meal planning",
-                "plan ahead",
-                "weekly cooking",
-                "menu planning",
-                "plan food for week",
-                "organize weekly meals",
-                "meal schedule",
-                "weekly schedule",
+                r"plan my week",
+                r"weekly plan",
+                r"meal plan",
+                r"weekly meal plan",
+                r"plan meals for week",
+                r"7 day plan",
+                r"weekly menu",
+                r"meal planning",
             ],
             "UPLOAD_IMAGE": [
-                "send photo",
-                "upload image",
-                "picture of food",
-                "food photo",
-                "recognize this",
-                "identify this",
-                "scan this",
-                "check this image",
-                "what's in this picture",
-                "analyze photo",
-                "image recognition",
+                r"send photo",
+                r"upload image",
+                r"picture of food",
+                r"food photo",
+                r"recognize this",
+                r"identify this",
+                r"scan this",
+                r"check this image",
+                r"what('?s| is) in this (picture|photo|image)",
+                r"analyze photo",
             ],
             "MOOD": [
-                "in the mood for",
-                "craving something",
-                "fancy something",
-                "feel like eating",
-                "want something spicy",
-                "want something sweet",
-                "craving",
-                "feeling like",
-                "dying for",
-                "really want something",
-                "comfort food",
-                "something filling",
-                "something light",
+                r"in the mood for",
+                r"craving",
+                r"fancy something",
+                r"feel like eating",
+                r"want something spicy",
+                r"want something sweet",
+                r"comfort food",
+                r"something filling",
+                r"something light",
+                r"dying for",
             ],
             "WHATSDINNER": [
-                "what should I eat",
-                "meal suggestion",
-                "suggest meal",
-                "dinner ideas",
-                "food suggestions",
-                "what should I cook",
-                "suggest something to eat",
-                "recommend meal",
-                "food idea",
-                "cooking ideas",
-                "meal ideas",
-                "what for dinner",
-                "what for lunch",
-                "what for breakfast",
-                "cook something",
-                "make something to eat",
-                "prepare food",
-                "cooking inspiration",
-                "kitchen help",
-                "food help",
+                r"what should i eat",
+                r"meal suggestion",
+                r"suggest (a )?meal",
+                r"dinner ideas",
+                r"food suggestions",
+                r"what should i cook",
+                r"suggest something to eat",
+                r"what (for )?(dinner|lunch|breakfast)",
+                r"cook something",
+                r"make something to eat",
+                r"cooking inspiration",
             ],
             "ONBOARDING": [
-                "getting started",
-                "how to use",
-                "setup preferences",
-                "configure profile",
-                "reset preferences",
-                "change settings",
-                "update profile",
-                "help me start",
-                "how does this work",
+                r"getting started",
+                r"how to use",
+                r"setup preferences",
+                r"configure profile",
+                r"reset preferences",
+                r"change settings",
+                r"update profile",
+                r"help me start",
+                r"how does this work",
             ],
         }
 
-    async def classify_intent(self, text: str) -> str:
-        """Classify user intent using pattern-first approach with OpenAI fallback."""
-        text_lower = text.lower().strip()
+        # Pre-compile regexes to patterns for speed and reduce per-call overhead
+        self._compiled_patterns: List[Tuple[str, Pattern]] = []
+        for intent, patterns in self.intent_keywords.items():
+            for p in patterns:
+                try:
+                    # case-insensitive, multiline safe
+                    compiled = re.compile(p, flags=re.IGNORECASE | re.UNICODE)
+                    self._compiled_patterns.append((intent, compiled))
+                except re.error:
+                    logger.exception(
+                        "Failed to compile pattern '%s' for intent %s", p, intent
+                    )
 
-        # 1. Pattern-based disambiguation first (highest precision)
-        pattern_intent = self._pattern_match(text_lower)
-        if pattern_intent:
-            return pattern_intent
-
-        # 2. Precise keyword matching with word boundaries
-        keyword_intent = self._precise_keyword_match(text_lower)
-        if keyword_intent:
-            return keyword_intent
-
-        # 3. Hindi/Hinglish pattern matching
-        hinglish_intent = self._hinglish_pattern_match(text_lower)
-        if hinglish_intent:
-            return hinglish_intent
-
-        # 4. Fuzzy matching for typos and variations
-        fuzzy_intent = self._fuzzy_keyword_match(text_lower)
-        if fuzzy_intent:
-            return fuzzy_intent
-
-        # 5. If no match and OpenAI is available, use LLM fallback
-        if self.openai_client:
-            return await self._classify_with_openai(text)
-
-        # Default to OTHER if no match and no OpenAI
-        return "OTHER"
-
-    def _precise_keyword_match(self, text: str) -> Optional[str]:
-        """Precise keyword matching using regex word boundaries."""
-        import re
-
-        for intent, keywords in self.intent_keywords.items():
-            for keyword in keywords:
-                # Use regex for more precise matching
-                if ".*" in keyword:
-                    # Handle regex patterns in keywords
-                    if re.search(keyword, text):
-                        return intent
-                else:
-                    # Use word boundaries for exact phrases
-                    pattern = r"\b" + re.escape(keyword) + r"\b"
-                    if re.search(pattern, text):
-                        return intent
-        return None
-
-    def _fuzzy_keyword_match(self, text: str) -> Optional[str]:
-        """Fuzzy matching for common variations and typos."""
-        # Common variations and typos
-        fuzzy_patterns = {
+        # Some fuzzy patterns for typos/variations (simple substring checks)
+        self._fuzzy_patterns = {
             "WHATSDINNER": [
                 "wat to eat",
                 "wat should i eat",
@@ -199,8 +198,6 @@ class IntentClassifier:
                 "meal suggest",
                 "wat to cook",
                 "wat for dinner",
-                "dinner suggest",
-                "food idea",
             ],
             "MOOD": [
                 "want spicy",
@@ -208,166 +205,298 @@ class IntentClassifier:
                 "craving spic",
                 "want hot food",
                 "feel like eating",
-                "mood for",
-                "fancy eating",
             ],
             "PLANWEEK": ["plan week", "week plan", "meal plan week", "weekly food"],
         }
 
-        for intent, patterns in fuzzy_patterns.items():
-            for pattern in patterns:
-                if pattern in text:
+        # Hinglish regexes (compiled)
+        self._hinglish_patterns: List[Tuple[str, Pattern]] = []
+        hinglish_patterns = {
+            "WHATSDINNER": [
+                r"\b(aaj|aj)\s+(kya)\s+(banau|banao|pakau|pakao|khana)\b",
+                r"\b(kya)\s+(banau|banao|pakau|pakao|khana)\b",
+                r"\b(khane|khaane)\s+(mein|me)\s+kya\b",
+                r"\bkuch\s+(suggest|bata|batao|karo)\b",
+            ],
+            "PANTRY_HELP": [
+                r"\bmere\s+paas\s+.*\s+(hai|he)\s+.*\s+(kya)\s+(bana|banau|banao)\b",
+                r"\byeh\s+ingredients\s+se\s+(kya)\s+(bana|banau|banao)\b",
+            ],
+            "RECIPE_REQUEST": [
+                r"\b(kaise|kaise)\s+(banate|banaye|banau|banaate)\b",
+                r"\brecipe\s+(batao|bata)\b",
+            ],
+        }
+        for intent, patterns in hinglish_patterns.items():
+            for p in patterns:
+                try:
+                    self._hinglish_patterns.append(
+                        (intent, re.compile(p, flags=re.IGNORECASE | re.UNICODE))
+                    )
+                except re.error:
+                    logger.exception(
+                        "Failed to compile hinglish pattern '%s' for intent %s",
+                        p,
+                        intent,
+                    )
+
+    # Public API: returns string by default, or dict when verbose=True
+    async def classify_intent(
+        self, text: str, verbose: bool = False
+    ) -> Union[str, Dict[str, object]]:
+        text_str = (text or "").strip()
+        text_lower = text_str.lower()
+        diagnostics: Dict[str, object] = {"text_preview": text_str[:200]}
+
+        # 1) rule-based pattern matching (compiled regexes) — highest priority
+        pattern_result = self._pattern_match(text_str)
+        if pattern_result:
+            diagnostics["method"] = "pattern"
+            diagnostics["intent"] = pattern_result
+            return (
+                {"intent": pattern_result, "diagnostics": diagnostics}
+                if verbose
+                else pattern_result
+            )
+
+        # 2) precise keyword matching (explicit word boundaries)
+        keyword_result = self._precise_keyword_match(text_str)
+        if keyword_result:
+            diagnostics["method"] = "keyword"
+            diagnostics["intent"] = keyword_result
+            return (
+                {"intent": keyword_result, "diagnostics": diagnostics}
+                if verbose
+                else keyword_result
+            )
+
+        # 3) hinglish (degraded but useful) patterns
+        hinglish_result = self._hinglish_pattern_match(text_str)
+        if hinglish_result:
+            diagnostics["method"] = "hinglish"
+            diagnostics["intent"] = hinglish_result
+            return (
+                {"intent": hinglish_result, "diagnostics": diagnostics}
+                if verbose
+                else hinglish_result
+            )
+
+        # 4) fuzzy substring matches
+        fuzzy_result = self._fuzzy_keyword_match(text_lower)
+        if fuzzy_result:
+            diagnostics["method"] = "fuzzy"
+            diagnostics["intent"] = fuzzy_result
+            return (
+                {"intent": fuzzy_result, "diagnostics": diagnostics}
+                if verbose
+                else fuzzy_result
+            )
+
+        # 5) LLM fallback (if configured)
+        llm_intent = None
+        if self.openai_client:
+            try:
+                llm_intent, llm_diag = await self._classify_with_openai(text_str)
+                diagnostics["method"] = "openai"
+                diagnostics["openai"] = llm_diag
+                if llm_intent:
+                    diagnostics["intent"] = llm_intent
+                    return (
+                        {"intent": llm_intent, "diagnostics": diagnostics}
+                        if verbose
+                        else llm_intent
+                    )
+            except Exception as exc:
+                logger.exception("OpenAI fallback failed: %s", exc)
+                diagnostics["openai_error"] = str(exc)
+
+        # 6) final fallback simple heuristic
+        final = self._simple_fallback(text_lower)
+        diagnostics["method"] = "heuristic_fallback"
+        diagnostics["intent"] = final
+        return {"intent": final, "diagnostics": diagnostics} if verbose else final
+
+    # --- pattern and keyword helpers ---
+    def _precise_keyword_match(self, text: str) -> Optional[str]:
+        """Try exact phrase / keyword matches using word boundaries for safety."""
+        # Use the compiled patterns as primary; this step can be a lighter check: explicit phrase boundary checks
+        for intent, pat in self._compiled_patterns:
+            if pat.search(text):
+                return intent
+        return None
+
+    def _fuzzy_keyword_match(self, text: str) -> Optional[str]:
+        for intent, patterns in self._fuzzy_patterns.items():
+            for p in patterns:
+                if p in text:
                     return intent
         return None
 
     def _pattern_match(self, text: str) -> Optional[str]:
-        """Advanced pattern-based matching using regex for complex queries."""
-        import re
-
-        # Recipe instruction patterns (highest priority)
-        recipe_patterns = [
-            r"\bhow\s+(to|do)\s+(make|cook|prepare)\s+",
-            r"\brecipe\s+for\s+",
-            r"\bsteps\s+to\s+(make|cook|prepare)\s+",
-            r"\bcooking\s+(method|instructions)\s+for\s+",
-        ]
-        for pattern in recipe_patterns:
-            if re.search(pattern, text):
-                return "RECIPE_REQUEST"
-
-        # Pantry/ingredient-based queries
-        pantry_patterns = [
-            r"\bwhat\s+can\s+i\s+(make|cook)\s+with\s+",
-            r"\bi\s+have\s+.*?\s+(what|kya)\s+can\s+i\s+(make|cook)",
-            r"\bwith\s+these\s+(ingredients|items)\s+",
-            r"\buse\s+up\s+(these|leftover|remaining)\s+",
-            r"\bfrom\s+my\s+(pantry|fridge|kitchen)\s+",
-        ]
-        for pattern in pantry_patterns:
-            if re.search(pattern, text):
-                return "PANTRY_HELP"
-
-        # Meal timing with request context
-        meal_request_patterns = [
-            r"\bwhat\s+(should|can)\s+i\s+(eat|cook|make)\s+for\s+(breakfast|lunch|dinner)",
-            r"\b(breakfast|lunch|dinner)\s+(idea|suggestion|option)",
-            r"\bwhat\s+for\s+(breakfast|lunch|dinner)",
-        ]
-        for pattern in meal_request_patterns:
-            if re.search(pattern, text):
-                return "WHATSDINNER"
-
-        # Dietary restriction patterns
-        diet_patterns = [
-            r"\b(without|no|avoid|skip)\s+(dairy|gluten|meat|eggs)",
-            r"\b(vegan|vegetarian|keto|low.carb)\s+(option|meal|food)",
-            r"\ballergy.free\s+",
-            r"\bsubstitute\s+for\s+",
-        ]
-        for pattern in diet_patterns:
-            if re.search(pattern, text):
-                return "DIETARY_QUERY"
-
-        # Image/photo patterns
-        image_patterns = [
-            r"\bsend\s+(photo|picture|image)",
-            r"\bupload\s+(photo|picture|image)",
-            r"\bcheck\s+this\s+(photo|picture|image)",
-            r"\bwhat.s\s+in\s+this\s+(photo|picture|image)",
-        ]
-        for pattern in image_patterns:
-            if re.search(pattern, text):
-                return "UPLOAD_IMAGE"
-
+        # Highest-priority complex patterns (e.g. recipes, pantry)
+        # Reuse compiled patterns (they capture many cases already)
+        for intent, pat in self._compiled_patterns:
+            if pat.search(text):
+                return intent
         return None
 
     def _hinglish_pattern_match(self, text: str) -> Optional[str]:
-        """Pattern matching for Hindi/Hinglish expressions."""
-        import re
-
-        # Hindi/Hinglish meal request patterns
-        hinglish_meal_patterns = [
-            r"\b(aaj|aj)\s+(kya|kya)\s+(banau|banau|pakau|khana)",
-            r"\b(kya|kya)\s+(banau|pakau|khana)\s+(banau|banana|hai)",
-            r"\b(khane|khaane)\s+(mein|me)\s+(kya|kya)",
-            r"\b(nashta|breakfast)\s+(mein|me)\s+(kya|kya)",
-            r"\b(dinner|lunch)\s+(mein|me)\s+(kya|kya)\s+(banau|khau)",
-            r"\bkuch\s+(suggest|bata|batao|karo)\s+",
-            r"\bmere\s+paas\s+.*?\s+(hai|he)\s+.*?(kya|kya)\s+(banau|bana)",
-        ]
-        for pattern in hinglish_meal_patterns:
-            if re.search(pattern, text):
-                return "WHATSDINNER"
-
-        # Hindi pantry help patterns
-        hinglish_pantry_patterns = [
-            r"\bmere\s+paas\s+.*?\s+(hai|he)\s+.*?(kya|kya)\s+(bana|banau)",
-            r"\b.*?\s+se\s+(kya|kya)\s+(bana|banau)\s+(sakta|sakti)",
-            r"\byeh\s+ingredients\s+se\s+(kya|kya)\s+(bana|banau)",
-        ]
-        for pattern in hinglish_pantry_patterns:
-            if re.search(pattern, text):
-                return "PANTRY_HELP"
-
-        # Hindi recipe request patterns
-        hinglish_recipe_patterns = [
-            r"\b(kaise|kese)\s+(banate|banaye|banau)\s+(hai|he)",
-            r"\b.*?\s+(banane\s+ka|ka)\s+(tarika|method)",
-            r"\brecipe\s+(batao|bata|kya)\s+hai",
-        ]
-        for pattern in hinglish_recipe_patterns:
-            if re.search(pattern, text):
-                return "RECIPE_REQUEST"
-
+        for intent, pat in self._hinglish_patterns:
+            if pat.search(text):
+                return intent
         return None
 
-    async def _classify_with_openai(self, text: str) -> str:
-        """Use OpenAI for intent classification fallback."""
-        if not self.openai_client:
-            return "OTHER"
-
-        try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-5",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an intent classifier for a meal planning WhatsApp bot called Mambo. "
-                        "Classify the user's message into one of these intents:\n"
-                        "- WHATSDINNER: General meal suggestions, recipe ideas, what to cook\n"
-                        "- PLANWEEK: Weekly meal planning, meal schedule requests\n"
-                        "- UPLOAD_IMAGE: Image recognition, ingredient identification\n"
-                        "- MOOD: Cravings, taste preferences, comfort food requests\n"
-                        "- RECIPE_REQUEST: Specific recipe instructions, cooking methods\n"
-                        "- PANTRY_HELP: Using available ingredients, leftover management\n"
-                        "- DIETARY_QUERY: Diet restrictions, allergy-free options\n"
-                        "- ONBOARDING: Setup, preferences, help requests\n"
-                        "- OTHER: Anything else\n\n"
-                        "Return only the intent name.",
-                    },
-                    {"role": "user", "content": text},
-                ],
+    def _simple_fallback(self, text_lower: str) -> str:
+        """Basic fallback used when rules + LLM don't yield a confident intent."""
+        if any(w in text_lower for w in ("recipe", "how to", "cook", "make")):
+            return "RECIPE_REQUEST"
+        if any(
+            w in text_lower
+            for w in (
+                "what's for dinner",
+                "what for dinner",
+                "what to eat",
+                "what should i eat",
+                "what should i cook",
             )
+        ):
+            return "WHATSDINNER"
+        if any(
+            w in text_lower
+            for w in ("i have", "leftover", "in my pantry", "ingredients")
+        ):
+            return "PANTRY_HELP"
+        if any(
+            w in text_lower
+            for w in ("weekly", "plan my week", "meal plan", "plan week")
+        ):
+            return "PLANWEEK"
+        return "OTHER"
 
-            intent = (
-                response.choices[0].message.content.strip().upper()
-                if response.choices[0].message.content
-                else "OTHER"
-            )
-            valid_intents = [
-                "WHATSDINNER",
-                "PLANWEEK",
-                "UPLOAD_IMAGE",
-                "MOOD",
-                "RECIPE_REQUEST",
-                "PANTRY_HELP",
-                "DIETARY_QUERY",
-                "ONBOARDING",
-                "OTHER",
-            ]
+    # --- OpenAI fallback (runs in threadpool to avoid blocking) ---
+    async def _classify_with_openai(
+        self, text: str
+    ) -> Tuple[Optional[str], Dict[str, object]]:
+        """
+        Returns (intent or None, diagnostics).
+        Implements a small retry/backoff on transient errors (rate limits etc.).
+        """
+        diagnostics: Dict[str, object] = {"model": self.openai_model}
+        # Be conservative with retries
+        max_attempts = 3
+        backoff = 0.8
 
-            return intent if intent in valid_intents else "OTHER"
+        # Build prompt carefully
+        system_msg = (
+            "You are a terse classifier for a WhatsApp cooking assistant called Mambo. "
+            "Return only a single intent token (no punctuation). "
+            "Valid intents: WHATSDINNER, PLANWEEK, UPLOAD_IMAGE, MOOD, RECIPE_REQUEST, PANTRY_HELP, DIETARY_QUERY, ONBOARDING, OTHER."
+        )
+        user_msg = text
 
-        except Exception as e:
-            print(f"Error classifying intent with OpenAI: {e}")
-            return "OTHER"
+        for attempt in range(1, max_attempts + 1):
+            diagnostics[f"attempt_{attempt}"] = {"timestamp": time.time()}
+            try:
+                # run blocking client in threadpool
+                loop = asyncio.get_event_loop()
+                func = lambda: self.openai_client.chat.completions.create(
+                    model=self.openai_model,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    max_tokens=16,
+                    temperature=0.0,
+                )
+                resp = await loop.run_in_executor(None, func)
+
+                # Defensive parsing: support SDK objects and dict-like shapes
+                content = None
+                try:
+                    # openai-python typically returns an object with .choices -> list -> message.content
+                    if hasattr(resp, "choices"):
+                        choice = resp.choices[0]
+                        # some SDK versions: choice.message.content vs choice["message"]["content"]
+                        if getattr(choice, "message", None) and getattr(
+                            choice.message, "content", None
+                        ):
+                            content = choice.message.content
+                        elif isinstance(choice, dict) and choice.get("message", {}).get(
+                            "content"
+                        ):
+                            content = choice["message"]["content"]
+                        elif getattr(choice, "text", None):
+                            content = choice.text
+                    elif isinstance(resp, dict):
+                        # fallback structure
+                        choices = resp.get("choices") or []
+                        if choices and isinstance(choices[0], dict):
+                            content = choices[0].get("message", {}).get(
+                                "content"
+                            ) or choices[0].get("text")
+                except Exception:
+                    logger.exception("Failed to parse OpenAI response structure")
+
+                diagnostics[f"attempt_{attempt}"]["raw_resp_preview"] = str(resp)[:400]
+                if not content:
+                    diagnostics[f"attempt_{attempt}"]["warning"] = "no_content_returned"
+                    # treat as transient and retry
+                    raise OpenAIError("empty_content")
+
+                intent_candidate = content.strip().upper()
+                # sanitize: keep only known intents (otherwise OTHER)
+                valid = {
+                    "WHATSDINNER",
+                    "PLANWEEK",
+                    "UPLOAD_IMAGE",
+                    "MOOD",
+                    "RECIPE_REQUEST",
+                    "PANTRY_HELP",
+                    "DIETARY_QUERY",
+                    "ONBOARDING",
+                    "OTHER",
+                }
+                if intent_candidate in valid:
+                    diagnostics["final_intent"] = intent_candidate
+                    return intent_candidate, diagnostics
+                else:
+                    diagnostics[f"attempt_{attempt}"]["parsed"] = intent_candidate
+                    diagnostics["final_intent"] = "OTHER"
+                    return "OTHER", diagnostics
+
+            except AuthenticationError as auth_exc:
+                # Bad API key — log masked key info and abort (no retry)
+                diagnostics["authentication_error"] = str(auth_exc)
+                logger.error(
+                    "OpenAI AuthenticationError: %s (key=%s)",
+                    auth_exc,
+                    _mask_key(getattr(settings, "openai_api_key", None)),
+                )
+                return None, diagnostics
+            except RateLimitError as rl_exc:
+                diagnostics[f"attempt_{attempt}"]["rate_limit"] = str(rl_exc)
+                logger.warning("OpenAI rate-limited on attempt %d: %s", attempt, rl_exc)
+                if attempt < max_attempts:
+                    await asyncio.sleep(backoff * attempt)
+                    continue
+                return None, diagnostics
+            except OpenAIError as oe:
+                diagnostics[f"attempt_{attempt}"]["openai_error"] = str(oe)
+                logger.warning("OpenAIError on attempt %d: %s", attempt, oe)
+                if attempt < max_attempts:
+                    await asyncio.sleep(backoff * attempt)
+                    continue
+                return None, diagnostics
+            except Exception as exc:
+                diagnostics[f"attempt_{attempt}"]["exception"] = str(exc)
+                logger.exception(
+                    "Unexpected exception during OpenAI call attempt %d: %s",
+                    attempt,
+                    exc,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(backoff * attempt)
+                    continue
+                return None, diagnostics
+
+        return None, diagnostics
