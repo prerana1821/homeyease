@@ -67,9 +67,13 @@ class TwilioClient:
 
     def test_connection(self) -> Dict[str, Any]:
         if not self._client:
+            logger.debug("test_connection: no twilio client configured")
             return {"ok": False, "error": "no_client"}
         try:
             acc = self._client.api.accounts(settings.twilio_account_sid).fetch()
+            logger.debug(
+                "test_connection: fetched account %s", getattr(acc, "sid", None)
+            )
             return {
                 "ok": True,
                 "account": {
@@ -92,10 +96,18 @@ class TwilioClient:
     ):
         """Attempt to record outgoing message in DB via repo if available. Non-fatal."""
         if not self.repo:
+            logger.debug("_persist_outgoing: no repo provided, skipping persistence")
             return None
+
         try:
-            # repo should handle transactions / auditing
+            # Preferred: repo has proper audit method
             if hasattr(self.repo, "record_outgoing_message"):
+                logger.debug(
+                    "_persist_outgoing: calling repo.record_outgoing_message user_id=%s to=%s sid=%s",
+                    user_id,
+                    to_phone,
+                    sid,
+                )
                 return self.repo.record_outgoing_message(
                     user_id=user_id,
                     to_phone=to_phone,
@@ -104,24 +116,37 @@ class TwilioClient:
                     status=status,
                     raw_response=raw,
                 )
-            # fallback to session creation if user doesn't want outgoing table:
-            if hasattr(self.repo, "create_session"):
-                # treat outgoing message as a session entry with prompt empty and response=body
-                return self.repo.create_session(
-                    user_id=user_id, prompt="outgoing_message", response=body
+
+            # Fallback: use sync wrapper
+            if hasattr(self.repo, "create_session_sync"):
+                logger.debug(
+                    "_persist_outgoing: using repo.create_session_sync fallback"
                 )
-        except Exception:
-            logger.exception("Failed to persist outgoing message to repo (non-fatal).")
+                return self.repo.create_session_sync(user_id, "outgoing_message", body)
+
+            logger.warning("_persist_outgoing: no persistence method found on repo")
+        except Exception as exc:
+            logger.exception(
+                "Failed to persist outgoing message to repo (non-fatal): %s", exc
+            )
         return None
 
     def _update_user_last_active(self, user_id: Optional[int]):
         if not self.repo or not user_id:
+            logger.debug("_update_user_last_active: no repo or no user_id; skipping")
             return
         try:
             if hasattr(self.repo, "update_user_last_active"):
+                logger.debug(
+                    "_update_user_last_active: calling repo.update_user_last_active(%s)",
+                    user_id,
+                )
                 return self.repo.update_user_last_active(user_id)
             # fallback: upsert_user_onboarding with last_active to avoid needing a specific method
             if hasattr(self.repo, "upsert_user_onboarding"):
+                logger.debug(
+                    "_update_user_last_active: falling back to repo.upsert_user_onboarding"
+                )
                 return self.repo.upsert_user_onboarding(
                     user_id, {"last_active": None}, action="outgoing_message"
                 )
@@ -147,6 +172,12 @@ class TwilioClient:
             "to": to_phone,
             "attempts": 0,
         }
+        logger.info(
+            "send_whatsapp_message: to=%s user_id=%s persist=%s",
+            to_phone,
+            user_id,
+            persist,
+        )
         if not self._client or not self.from_number:
             meta.update({"error": "twilio_not_configured"})
             logger.warning(
@@ -177,16 +208,27 @@ class TwilioClient:
                 meta.update(
                     {"ok": True, "twilio_sid": sid, "twilio_status": status, "raw": raw}
                 )
+                logger.info(
+                    "Twilio send succeeded attempt=%s sid=%s status=%s",
+                    attempt,
+                    sid,
+                    status,
+                )
                 # persist outgoing message
                 if persist:
-                    self._persist_outgoing(
-                        user_id=user_id,
-                        to_phone=to_phone,
-                        body=message,
-                        sid=sid,
-                        status=status,
-                        raw=raw,
-                    )
+                    try:
+                        self._persist_outgoing(
+                            user_id=user_id,
+                            to_phone=to_phone,
+                            body=message,
+                            sid=sid,
+                            status=status,
+                            raw=raw,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Persistence of outgoing message raised (non-fatal)."
+                        )
                     self._update_user_last_active(user_id)
                 return meta
             except TwilioRestException as exc:
@@ -208,14 +250,19 @@ class TwilioClient:
                 if code in non_transient_codes:
                     # persist failure if desired
                     if persist:
-                        self._persist_outgoing(
-                            user_id=user_id,
-                            to_phone=to_phone,
-                            body=message,
-                            sid=None,
-                            status=f"error:{code}",
-                            raw={"error": msg_text},
-                        )
+                        try:
+                            self._persist_outgoing(
+                                user_id=user_id,
+                                to_phone=to_phone,
+                                body=message,
+                                sid=None,
+                                status=f"error:{code}",
+                                raw={"error": msg_text},
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to persist outgoing error record (non-fatal)."
+                            )
                     return meta
                 last_exc = exc
             except TwilioException as exc:
@@ -235,7 +282,9 @@ class TwilioClient:
                 )
 
             # backoff before retry (exponential)
-            time.sleep(self.retry_backoff * (2 ** (attempt - 1)))
+            sleep_for = self.retry_backoff * (2 ** (attempt - 1))
+            logger.debug("Backing off for %.3fs before next attempt", sleep_for)
+            time.sleep(sleep_for)
 
         # exhausted retries
         meta.update(
@@ -245,16 +294,26 @@ class TwilioClient:
                 "last_error": str(last_exc) if last_exc else None,
             }
         )
+        logger.error(
+            "send_whatsapp_message exhausted retries to=%s last_error=%s",
+            to_phone,
+            meta.get("last_error"),
+        )
         # persist final failure record if requested
         if persist:
-            self._persist_outgoing(
-                user_id=user_id,
-                to_phone=to_phone,
-                body=message,
-                sid=None,
-                status="exhausted_retries",
-                raw={"last_error": str(last_exc)},
-            )
+            try:
+                self._persist_outgoing(
+                    user_id=user_id,
+                    to_phone=to_phone,
+                    body=message,
+                    sid=None,
+                    status="exhausted_retries",
+                    raw={"last_error": str(last_exc)},
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist final exhausted_retries record (non-fatal)."
+                )
         return meta
 
     def send_media_message(
@@ -265,7 +324,14 @@ class TwilioClient:
         user_id: Optional[int] = None,
         persist: bool = True,
     ) -> Dict[str, Any]:
+        logger.info(
+            "send_media_message: to=%s user_id=%s media_count=%s",
+            to_phone,
+            user_id,
+            len(media_urls),
+        )
         if not self._client or not self.from_number:
+            logger.warning("send_media_message: twilio not configured")
             return {"ok": False, "error": "twilio_not_configured"}
         from_ = (
             self.from_number
@@ -281,15 +347,19 @@ class TwilioClient:
             sid = getattr(msg, "sid", None)
             status = getattr(msg, "status", None)
             raw = {"sid": sid, "status": status}
+            logger.info("send_media_message succeeded sid=%s status=%s", sid, status)
             if persist:
-                self._persist_outgoing(
-                    user_id=user_id,
-                    to_phone=to_phone,
-                    body=body or "",
-                    sid=sid,
-                    status=status,
-                    raw=raw,
-                )
+                try:
+                    self._persist_outgoing(
+                        user_id=user_id,
+                        to_phone=to_phone,
+                        body=body or "",
+                        sid=sid,
+                        status=status,
+                        raw=raw,
+                    )
+                except Exception:
+                    logger.exception("Failed to persist outgoing media (non-fatal).")
                 self._update_user_last_active(user_id)
             return {"ok": True, "details": {"sid": sid, "status": status}, "raw": raw}
         except TwilioException as exc:

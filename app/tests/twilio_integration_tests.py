@@ -52,7 +52,7 @@ async def main():
                         "value": {
                             "messages": [
                                 {
-                                    "from": "whatsapp:+919967127569",  # realistic format
+                                    "from": "whatsapp:+919152635928",  # realistic format
                                     "id": "SIM_TEST_1",
                                     "timestamp": "1690000000",
                                     "type": "text",
